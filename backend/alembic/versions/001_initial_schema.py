@@ -173,14 +173,14 @@ def upgrade() -> None:
         sa.Column("sent_at", sa.DateTime, nullable=True),
     )
 
-    # Create vector similarity index (IVFFlat for better performance at scale)
+    # Create HNSW vector similarity indexes (works on empty tables, better recall)
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_conv_chunks_embedding "
-        "ON conversation_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+        "ON conversation_chunks USING hnsw (embedding vector_cosine_ops)"
     )
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_doc_chunks_embedding "
-        "ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+        "ON document_chunks USING hnsw (embedding vector_cosine_ops)"
     )
 
 

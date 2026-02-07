@@ -15,9 +15,9 @@ import sys
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from monitor.app.config import get_settings
-from monitor.app.relay import RedisRelay
-from monitor.app.handlers import register_handlers
+from app.config import get_settings
+from app.relay import RedisRelay
+from app.handlers import register_handlers
 
 # Logging
 logging.basicConfig(

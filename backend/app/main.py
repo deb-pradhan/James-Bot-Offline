@@ -34,15 +34,18 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("[STARTUP] Database initialized")
 
-    # Run Alembic migrations on startup (optional — can also run separately)
-    # This ensures the DB schema is always up-to-date on Railway deploys
+    # Run Alembic migrations on startup
+    # entrypoint.sh already runs this, but this is a fallback for non-Docker deploys
     try:
-        from alembic.config import Config
-        from alembic import command
-
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("[STARTUP] Alembic migrations applied")
+        import subprocess
+        result = subprocess.run(
+            ["python", "-m", "alembic", "upgrade", "head"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("[STARTUP] Alembic migrations applied")
+        else:
+            logger.warning(f"[STARTUP] Alembic migration issue: {result.stderr[:200]}")
     except Exception as e:
         logger.warning(f"[STARTUP] Alembic migration skipped: {e}")
 

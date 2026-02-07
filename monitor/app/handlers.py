@@ -5,7 +5,7 @@ Telegram event handlers for the monitor service.
 import logging
 from datetime import datetime
 from telethon import TelegramClient, events
-from monitor.app.relay import RedisRelay
+from app.relay import RedisRelay
 
 logger = logging.getLogger(__name__)
 
