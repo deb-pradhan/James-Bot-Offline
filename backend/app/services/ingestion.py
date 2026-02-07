@@ -298,7 +298,7 @@ async def get_or_create_contact(
     contact = Contact(
         user_id=user_id,
         telegram_id=chat.telegram_chat_id,
-        display_name=chat.chat_name,
+        display_name=chat.chat_name or f"Chat {chat.telegram_chat_id}",
         chat_type=chat.chat_type,
     )
     db.add(contact)

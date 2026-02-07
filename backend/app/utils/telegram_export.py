@@ -136,8 +136,8 @@ def parse_telegram_export(data: dict) -> tuple[list[ParsedChat], str]:
         if messages:
             parsed_chats.append(
                 ParsedChat(
-                    chat_name=chat.get("name", "Unknown"),
-                    chat_type=chat.get("type", "personal_chat"),
+                    chat_name=chat.get("name") or "Unknown",
+                    chat_type=chat.get("type") or "personal_chat",
                     telegram_chat_id=str(chat.get("id", "")),
                     messages=messages,
                 )
