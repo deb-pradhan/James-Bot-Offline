@@ -193,18 +193,19 @@ async def generate_all_suggestions(
 @router.post("/{suggestion_id}/approve")
 async def approve_suggestion(
     suggestion_id: str,
+    mode: str = "draft",
     db: AsyncSession = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
-    """Approve and send a suggestion via Telegram."""
+    """Approve a suggestion — save as Telegram draft (default) or send directly."""
     suggestion = await db.get(ResponseSuggestion, uuid.UUID(suggestion_id))
     if not suggestion or suggestion.user_id != user.id:
         raise HTTPException(status_code=404, detail="Suggestion not found")
 
     contact = await db.get(Contact, suggestion.contact_id)
 
-    # Send via Telegram monitor (publish to Redis)
+    # Publish to Telegram monitor via Redis
     await redis_client.publish(
         "telegram:send_commands",
         json.dumps(
@@ -212,12 +213,16 @@ async def approve_suggestion(
                 "user_id": str(user.id),
                 "chat_id": contact.telegram_id,
                 "text": suggestion.suggested_response,
+                "mode": mode,
             }
         ),
     )
 
-    suggestion.status = "sent"
-    suggestion.sent_at = datetime.utcnow()
+    if mode == "draft":
+        suggestion.status = "drafted"
+    else:
+        suggestion.status = "sent"
+        suggestion.sent_at = datetime.utcnow()
 
     # Reset unresponded count
     if contact:
@@ -225,11 +230,12 @@ async def approve_suggestion(
 
     await db.commit()
 
+    action = "saved as draft" if mode == "draft" else "sent"
     logger.info(
-        f"[SUGGEST] Suggestion {suggestion_id} approved and sent to {contact.display_name}"
+        f"[SUGGEST] Suggestion {suggestion_id} {action} for {contact.display_name}"
     )
 
-    return {"status": "sent", "message": f"Message sent to {contact.display_name}"}
+    return {"status": suggestion.status, "message": f"Message {action} for {contact.display_name}"}
 
 
 @router.post("/{suggestion_id}/edit")
@@ -240,7 +246,7 @@ async def edit_and_send_suggestion(
     redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
-    """Edit a suggestion's text and send it."""
+    """Edit a suggestion's text and save as draft or send."""
     suggestion = await db.get(ResponseSuggestion, uuid.UUID(suggestion_id))
     if not suggestion or suggestion.user_id != user.id:
         raise HTTPException(status_code=404, detail="Suggestion not found")
@@ -248,8 +254,9 @@ async def edit_and_send_suggestion(
     contact = await db.get(Contact, suggestion.contact_id)
 
     suggestion.suggested_response = req.text
+    mode = req.mode
 
-    # Send edited version
+    # Publish edited version to Telegram monitor
     await redis_client.publish(
         "telegram:send_commands",
         json.dumps(
@@ -257,19 +264,24 @@ async def edit_and_send_suggestion(
                 "user_id": str(user.id),
                 "chat_id": contact.telegram_id,
                 "text": req.text,
+                "mode": mode,
             }
         ),
     )
 
-    suggestion.status = "sent"
-    suggestion.sent_at = datetime.utcnow()
+    if mode == "draft":
+        suggestion.status = "drafted"
+    else:
+        suggestion.status = "sent"
+        suggestion.sent_at = datetime.utcnow()
 
     if contact:
         contact.unresponded_count = 0
 
     await db.commit()
 
-    return {"status": "sent", "message": f"Edited message sent to {contact.display_name}"}
+    action = "saved as draft" if mode == "draft" else "sent"
+    return {"status": suggestion.status, "message": f"Edited message {action} for {contact.display_name}"}
 
 
 @router.delete("/{suggestion_id}")

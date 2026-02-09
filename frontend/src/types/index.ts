@@ -83,6 +83,8 @@ export interface UnrespondedContact {
   last_message_at?: string | null;
   last_message_preview?: string | null;
   has_pending_suggestion: boolean;
+  pending_suggestion_id?: string | null;
+  pending_suggestion_text?: string | null;
 }
 
 // ── Query ──
@@ -91,12 +93,72 @@ export interface QueryResponse {
   sources: SourceChunk[];
 }
 
+export interface ChatSuggestionsResponse {
+  suggestions: string[];
+  personalized: boolean;
+}
+
 export interface SourceChunk {
   contact_name?: string | null;
   document_name?: string | null;
   text_preview: string;
   timestamp?: string | null;
   relevance_score: number;
+}
+
+// ── Costs ──
+export interface ServiceCost {
+  service: string;
+  cost_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  api_calls: number;
+}
+
+export interface OperationCost {
+  operation: string;
+  cost_usd: number;
+  api_calls: number;
+}
+
+export interface DailyCost {
+  date: string;
+  cost_usd: number;
+  api_calls: number;
+}
+
+export interface CostSummary {
+  total_cost_usd: number;
+  today_cost_usd: number;
+  month_cost_usd: number;
+  total_llm_tokens_in: number;
+  total_llm_tokens_out: number;
+  total_embedding_tokens: number;
+  total_api_calls: number;
+  by_service: ServiceCost[];
+  by_operation: OperationCost[];
+  daily_costs: DailyCost[];
+}
+
+// ── Ingestion History ──
+export interface IngestionHistoryItem {
+  job_id: string;
+  status: string;
+  filename: string | null;
+  file_hash: string | null;
+  chat_date_start: string | null;
+  chat_date_end: string | null;
+  total_messages_in_file: number | null;
+  messages_new: number | null;
+  messages_skipped: number | null;
+  total_chats: number | null;
+  total_chunks: number | null;
+  ingested_at: string;
+}
+
+export interface IngestionHistoryResponse {
+  items: IngestionHistoryItem[];
+  total: number;
 }
 
 // ── WebSocket Events ──

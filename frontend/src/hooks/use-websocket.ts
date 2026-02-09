@@ -5,12 +5,14 @@ import type { WSEvent } from "@/types";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/ws";
 
-export function useWebSocket() {
+export function useWebSocket(onEvent?: (event: WSEvent) => void) {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [lastEvent, setLastEvent] = useState<WSEvent | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>("");
   const reconnectTimeout = useRef<NodeJS.Timeout | null>(null);
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
 
   const connect = useCallback(() => {
     const token = localStorage.getItem("token");
@@ -35,6 +37,9 @@ export function useWebSocket() {
           }
 
           setLastEvent(data);
+
+          // Fire callback for consumers to react to events
+          onEventRef.current?.(data);
 
           // Update status message for progress events
           if (data.message) {

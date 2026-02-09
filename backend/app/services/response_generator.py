@@ -104,6 +104,8 @@ async def generate_reply(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=0.7,
+        user_id=user_id,
+        operation="ghostwrite",
     )
 
     # Store suggestion
@@ -160,6 +162,8 @@ async def query_chat_history(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=0.3,  # Lower temp for factual answers
+        user_id=user_id,
+        operation="query",
     )
 
     # Build source citations

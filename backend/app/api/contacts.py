@@ -10,6 +10,7 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.contact import Contact
 from app.models.message import Message
+from app.services.llm import generate_response
 from app.schemas.contact import (
     ContactResponse,
     ContactListResponse,
@@ -199,3 +200,58 @@ async def get_contact_messages(
             created_at=contact.created_at,
         ),
     )
+
+
+SUMMARY_SYSTEM = """You are a concise conversation analyst. You are summarizing a chat for the user ("You") so they can quickly get up to speed before replying.
+
+Rules:
+- 3-5 bullet points max
+- ALWAYS refer to the user as "You" (never by their name)
+- Refer to the other person by their name
+- Focus on: what's being discussed, any open questions/requests aimed at You, emotional tone, anything that needs a reply
+- Use present tense ("They're asking you about...", "You discussed...")
+- Keep each bullet to one line
+- No preamble, just the bullets"""
+
+
+@router.get("/{contact_id}/summary")
+async def get_contact_summary(
+    contact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Generate a quick summary of recent conversation context."""
+    contact = await db.get(Contact, uuid.UUID(contact_id))
+    if not contact or contact.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    # Fetch last 30 messages for context
+    stmt = (
+        select(Message)
+        .where(Message.contact_id == contact.id)
+        .order_by(desc(Message.sent_at))
+        .limit(30)
+    )
+    result = await db.execute(stmt)
+    messages = list(reversed(result.scalars().all()))
+
+    if not messages:
+        return {"summary": "No messages yet."}
+
+    # Build chat transcript — use "You" for self messages
+    lines = []
+    for m in messages:
+        name = "You" if m.sender_type == "self" else contact.display_name
+        lines.append(f"{name}: {m.content}")
+    transcript = "\n".join(lines)
+
+    summary = await generate_response(
+        system_prompt=SUMMARY_SYSTEM,
+        user_prompt=f"Summarize this conversation between You and {contact.display_name}:\n\n{transcript}",
+        max_tokens=300,
+        temperature=0.3,
+        user_id=user.id,
+        operation="chat_summary",
+    )
+
+    return {"summary": summary, "message_count": len(messages)}

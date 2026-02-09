@@ -1,9 +1,10 @@
-"""Dashboard routes — overview stats, unresponded contacts."""
+"""Dashboard routes — overview stats, unresponded contacts, cost tracking."""
 
 import logging
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, cast, Date
 import redis.asyncio as aioredis
 
 from app.database import get_db
@@ -14,10 +15,15 @@ from app.models.message import Message
 from app.models.document import Document
 from app.models.chunk import ConversationChunk, DocumentChunk
 from app.models.suggestion import ResponseSuggestion
+from app.models.api_usage import ApiUsage
 from app.schemas.dashboard import (
     DashboardOverview,
     UnrespondedContact,
     UnrespondedListResponse,
+    CostSummary,
+    ServiceCost,
+    OperationCost,
+    DailyCost,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,16 +145,17 @@ async def get_unresponded(
         )
         last_msg = (await db.execute(last_msg_stmt)).scalar_one_or_none()
 
-        # Check for pending suggestions
+        # Fetch the actual pending suggestion (most recent)
         suggestion_stmt = (
-            select(func.count())
-            .select_from(ResponseSuggestion)
+            select(ResponseSuggestion)
             .where(
                 ResponseSuggestion.contact_id == c.id,
                 ResponseSuggestion.status == "pending",
             )
+            .order_by(desc(ResponseSuggestion.created_at))
+            .limit(1)
         )
-        has_suggestion = ((await db.execute(suggestion_stmt)).scalar() or 0) > 0
+        suggestion = (await db.execute(suggestion_stmt)).scalar_one_or_none()
 
         items.append(
             UnrespondedContact(
@@ -158,8 +165,162 @@ async def get_unresponded(
                 unresponded_count=c.unresponded_count,
                 last_message_at=c.last_message_at,
                 last_message_preview=last_msg.content[:100] if last_msg else None,
-                has_pending_suggestion=has_suggestion,
+                has_pending_suggestion=suggestion is not None,
+                pending_suggestion_id=str(suggestion.id) if suggestion else None,
+                pending_suggestion_text=suggestion.suggested_response if suggestion else None,
             )
         )
 
     return UnrespondedListResponse(contacts=items, total=len(items))
+
+
+@router.get("/costs", response_model=CostSummary)
+async def get_costs(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get aggregated cost/usage stats for the current user."""
+    logger.info(f"[DASHBOARD] Costs for {user.email}")
+
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    thirty_days_ago = now - timedelta(days=30)
+
+    base_filter = ApiUsage.user_id == user.id
+
+    # ── Total cost ──
+    total_cost = (
+        await db.execute(
+            select(func.coalesce(func.sum(ApiUsage.cost_usd), 0.0)).where(base_filter)
+        )
+    ).scalar()
+
+    # ── Today's cost ──
+    today_cost = (
+        await db.execute(
+            select(func.coalesce(func.sum(ApiUsage.cost_usd), 0.0)).where(
+                base_filter, ApiUsage.created_at >= today_start
+            )
+        )
+    ).scalar()
+
+    # ── This month's cost ──
+    month_cost = (
+        await db.execute(
+            select(func.coalesce(func.sum(ApiUsage.cost_usd), 0.0)).where(
+                base_filter, ApiUsage.created_at >= month_start
+            )
+        )
+    ).scalar()
+
+    # ── Total API calls ──
+    total_calls = (
+        await db.execute(
+            select(func.count()).select_from(ApiUsage).where(base_filter)
+        )
+    ).scalar() or 0
+
+    # ── Token totals: LLM (anthropic) vs embedding ──
+    llm_tokens = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(ApiUsage.input_tokens), 0),
+                func.coalesce(func.sum(ApiUsage.output_tokens), 0),
+            ).where(base_filter, ApiUsage.service == "anthropic")
+        )
+    ).one()
+    total_llm_in, total_llm_out = int(llm_tokens[0]), int(llm_tokens[1])
+
+    embed_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(ApiUsage.input_tokens), 0)).where(
+                base_filter, ApiUsage.service != "anthropic"
+            )
+        )
+    ).scalar()
+    total_embed = int(embed_tokens)
+
+    # ── Breakdown by service ──
+    service_rows = (
+        await db.execute(
+            select(
+                ApiUsage.service,
+                func.sum(ApiUsage.cost_usd),
+                func.sum(ApiUsage.input_tokens),
+                func.sum(ApiUsage.output_tokens),
+                func.count(),
+            )
+            .where(base_filter)
+            .group_by(ApiUsage.service)
+        )
+    ).all()
+
+    by_service = [
+        ServiceCost(
+            service=row[0],
+            cost_usd=round(float(row[1]), 6),
+            total_input_tokens=int(row[2]),
+            total_output_tokens=int(row[3]),
+            api_calls=int(row[4]),
+        )
+        for row in service_rows
+    ]
+
+    # ── Breakdown by operation ──
+    op_rows = (
+        await db.execute(
+            select(
+                ApiUsage.operation,
+                func.sum(ApiUsage.cost_usd),
+                func.count(),
+            )
+            .where(base_filter)
+            .group_by(ApiUsage.operation)
+        )
+    ).all()
+
+    by_operation = [
+        OperationCost(
+            operation=row[0],
+            cost_usd=round(float(row[1]), 6),
+            api_calls=int(row[2]),
+        )
+        for row in op_rows
+    ]
+
+    # ── Daily costs (last 30 days) ──
+    daily_rows = (
+        await db.execute(
+            select(
+                cast(ApiUsage.created_at, Date).label("day"),
+                func.sum(ApiUsage.cost_usd),
+                func.count(),
+            )
+            .where(base_filter, ApiUsage.created_at >= thirty_days_ago)
+            .group_by("day")
+            .order_by("day")
+        )
+    ).all()
+
+    daily_costs = [
+        DailyCost(
+            date=str(row[0]),
+            cost_usd=round(float(row[1]), 6),
+            api_calls=int(row[2]),
+        )
+        for row in daily_rows
+    ]
+
+    return CostSummary(
+        total_cost_usd=round(float(total_cost), 6),
+        today_cost_usd=round(float(today_cost), 6),
+        month_cost_usd=round(float(month_cost), 6),
+        total_llm_tokens_in=total_llm_in,
+        total_llm_tokens_out=total_llm_out,
+        total_embedding_tokens=total_embed,
+        total_api_calls=total_calls,
+        by_service=by_service,
+        by_operation=by_operation,
+        daily_costs=daily_costs,
+    )

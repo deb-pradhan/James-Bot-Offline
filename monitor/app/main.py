@@ -15,9 +15,11 @@ import sys
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import SaveDraftRequest
 from app.config import get_settings
 from app.relay import RedisRelay
 from app.handlers import register_handlers
+from app.sync import initial_sync
 
 # Logging
 logging.basicConfig(
@@ -54,17 +56,33 @@ async def start_monitor(
         return
 
     me = await client.get_me()
-    logger.info(f"[MONITOR] Connected as {me.first_name} (ID: {me.id})")
+    tg_display_name = " ".join(filter(None, [me.first_name, me.last_name])) or me.username
+    logger.info(f"[MONITOR] Connected as {tg_display_name} (ID: {me.id})")
 
     await relay.set_connected(user_id, True)
     await relay.publish_status(
         user_id,
         "telegram_status",
-        {"connected": True, "user_name": me.first_name, "user_id": str(me.id)},
+        {"connected": True, "user_name": tg_display_name, "user_id": str(me.id)},
     )
 
-    # Register event handlers
+    # Persist Telegram display name back to DB so summaries/ghostwriting use it
+    # Small delay to ensure consumer is subscribed (avoids startup race)
+    async def _push_name():
+        await asyncio.sleep(3)
+        await relay.redis.publish(
+            "telegram:update_user_name",
+            json.dumps({"user_id": user_id, "name": tg_display_name}),
+        )
+    asyncio.create_task(_push_name())
+
+    # Register event handlers (captures real-time messages going forward)
     register_handlers(client, relay, user_id, me.id)
+
+    # Initial sync — fetch all existing dialogs + recent messages
+    # This runs before the event loop so the DB has a full picture.
+    # Dedup ensures real-time messages arriving during sync aren't doubled.
+    await initial_sync(client, relay, user_id, me.id)
 
     # Listen for send commands in a separate task
     async def handle_send_commands():
@@ -77,15 +95,24 @@ async def start_monitor(
 
                 chat_id = int(data["chat_id"])
                 text = data["text"]
+                mode = data.get("mode", "draft")
 
-                logger.info(f"[MONITOR] Sending message to chat {chat_id}")
-                await client.send_message(chat_id, text)
-
-                await relay.publish_status(
-                    user_id,
-                    "processing_status",
-                    {"message": f"Message sent to chat {chat_id}"},
-                )
+                if mode == "draft":
+                    logger.info(f"[MONITOR] Saving draft in chat {chat_id}")
+                    await client(SaveDraftRequest(peer=chat_id, message=text))
+                    await relay.publish_status(
+                        user_id,
+                        "processing_status",
+                        {"message": f"Draft saved in chat {chat_id} — open Telegram to review & send"},
+                    )
+                else:
+                    logger.info(f"[MONITOR] Sending message to chat {chat_id}")
+                    await client.send_message(chat_id, text)
+                    await relay.publish_status(
+                        user_id,
+                        "processing_status",
+                        {"message": f"Message sent to chat {chat_id}"},
+                    )
             except Exception as e:
                 logger.error(f"[MONITOR] Send command failed: {e}", exc_info=True)
 
@@ -129,6 +156,12 @@ async def main():
 
     # Poll Redis for sessions set by the API auth flow
     logger.info("[MONITOR] No env session found. Polling Redis for sessions...")
+
+    # Reset all stale "connected" flags from previous instances.
+    # If the container was killed, the finally block never ran.
+    async for key in relay.redis.scan_iter("telegram:connected:*"):
+        await relay.redis.set(key, "false")
+    logger.info("[MONITOR] Reset stale connection flags")
 
     while True:
         try:

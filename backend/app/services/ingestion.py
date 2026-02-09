@@ -9,13 +9,14 @@ Pipeline:
 5. Trigger style analysis per contact
 """
 
+import hashlib
 import json
 import logging
 import uuid
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 import redis.asyncio as aioredis
 
 from app.models.contact import Contact
@@ -23,7 +24,7 @@ from app.models.message import Message
 from app.models.chunk import ConversationChunk
 from app.services.embedding import embed_texts
 from app.services.style_analyzer import analyze_contact_style
-from app.utils.telegram_export import parse_telegram_export, ParsedChat
+from app.utils.telegram_export import parse_telegram_export, ParsedChat, ExportMetadata
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -48,8 +49,11 @@ async def publish_status(
     message: str,
     progress: int | None = None,
     total: int | None = None,
+    *,
+    db: AsyncSession | None = None,
+    job_id: uuid.UUID | None = None,
 ):
-    """Publish ingestion status update to Redis for WebSocket relay."""
+    """Publish ingestion status update to Redis and persist to DB."""
     import json as _json
 
     event = {
@@ -63,6 +67,22 @@ async def publish_status(
     }
     await redis_client.publish(f"user:{user_id}:events", _json.dumps(event))
 
+    # Persist to DB for reconnect recovery
+    if db and job_id:
+        from app.models.job import IngestionJob
+
+        stmt = (
+            select(IngestionJob).where(IngestionJob.id == job_id).with_for_update()
+        )
+        result = await db.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job:
+            job.step = step
+            job.progress = progress
+            job.total = total
+            job.message = message
+            await db.commit()
+
 
 async def ingest_telegram_export(
     db: AsyncSession,
@@ -71,6 +91,8 @@ async def ingest_telegram_export(
     file_content: bytes,
     user_name: str,
     self_user_id_override: str | None = None,
+    job_id: uuid.UUID | None = None,
+    filename: str | None = None,
 ) -> dict:
     """
     Full ingestion pipeline. Returns summary stats.
@@ -79,33 +101,58 @@ async def ingest_telegram_export(
     """
     user_id_str = str(user_id)
 
+    async def _status(step: str, message: str, progress: int | None = None, total: int | None = None):
+        await publish_status(
+            redis_client, user_id_str, step, message,
+            progress=progress, total=total, db=db, job_id=job_id,
+        )
+
     # ── Step 1: Parse JSON ──
-    await publish_status(redis_client, user_id_str, "parsing", "Parsing Telegram export...")
+    await _status("parsing", "Parsing Telegram export...")
+
+    # Compute file hash for duplicate detection
+    file_hash = hashlib.sha256(file_content).hexdigest()
+
     try:
         data = json.loads(file_content)
     except json.JSONDecodeError as e:
         logger.error(f"[INGEST] Invalid JSON: {e}")
         raise ValueError(f"Invalid JSON file: {e}")
 
-    parsed_chats, detected_self_id = parse_telegram_export(data)
+    parsed_chats, detected_self_id, export_meta = parse_telegram_export(data)
     self_id = self_user_id_override or detected_self_id
 
     if not parsed_chats:
         raise ValueError("No chats found in the export file")
 
     logger.info(
-        f"[INGEST] Starting ingestion: {len(parsed_chats)} chats, self_id={self_id}"
+        f"[INGEST] Starting ingestion: {len(parsed_chats)} chats, self_id={self_id}, "
+        f"date range: {export_meta.chat_date_start} → {export_meta.chat_date_end}"
     )
+
+    # Persist history metadata on the job row
+    if job_id:
+        from app.models.job import IngestionJob
+
+        stmt = select(IngestionJob).where(IngestionJob.id == job_id)
+        result = await db.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job:
+            job.filename = filename
+            job.file_hash = file_hash
+            job.chat_date_start = export_meta.chat_date_start
+            job.chat_date_end = export_meta.chat_date_end
+            job.total_messages_in_file = export_meta.total_messages
+            await db.commit()
 
     # ── Step 2: Create contacts + messages ──
     total_chats = len(parsed_chats)
     total_messages = 0
+    total_skipped = 0
     contacts_created = []
 
     for i, chat in enumerate(parsed_chats):
-        await publish_status(
-            redis_client,
-            user_id_str,
+        await _status(
             "importing",
             f"Importing chat {i + 1}/{total_chats}: {chat.chat_name}",
             progress=i + 1,
@@ -116,9 +163,19 @@ async def ingest_telegram_export(
         contact = await get_or_create_contact(db, user_id, chat)
         contacts_created.append(contact)
 
-        # Batch insert messages
+        # Fetch existing telegram_msg_ids to skip duplicates
+        existing_stmt = select(Message.telegram_msg_id).where(
+            Message.contact_id == contact.id,
+            Message.telegram_msg_id.isnot(None),
+        )
+        existing_result = await db.execute(existing_stmt)
+        existing_msg_ids = set(existing_result.scalars().all())
+
+        # Insert only new messages
         msg_count = 0
         for msg in chat.messages:
+            if msg.telegram_msg_id in existing_msg_ids:
+                continue
             sender_type = "self" if msg.sender_id == self_id else "other"
             db_msg = Message(
                 contact_id=contact.id,
@@ -133,7 +190,14 @@ async def ingest_telegram_export(
             db.add(db_msg)
             msg_count += 1
 
-        contact.total_messages = (contact.total_messages or 0) + msg_count
+        skipped = len(chat.messages) - msg_count
+        total_skipped += skipped
+        if skipped > 0:
+            logger.info(
+                f"[INGEST] {chat.chat_name}: {msg_count} new, {skipped} skipped (already exist)"
+            )
+        if msg_count > 0:
+            contact.total_messages = (contact.total_messages or 0) + msg_count
         if chat.messages:
             contact.last_message_at = max(m.sent_at for m in chat.messages)
         total_messages += msg_count
@@ -143,22 +207,28 @@ async def ingest_telegram_export(
             await db.flush()
 
     await db.commit()
-    logger.info(f"[INGEST] Imported {total_messages} messages across {total_chats} chats")
+    logger.info(
+        f"[INGEST] Imported {total_messages} messages across {total_chats} chats "
+        f"({total_skipped} duplicates skipped)"
+    )
 
     # ── Step 3: Chunk conversations ──
-    await publish_status(
-        redis_client, user_id_str, "chunking", "Chunking conversations..."
-    )
+    await _status("chunking", "Chunking conversations...")
 
     total_chunks = 0
     for i, contact in enumerate(contacts_created):
-        await publish_status(
-            redis_client,
-            user_id_str,
+        await _status(
             "chunking",
             f"Chunking contact {i + 1}/{len(contacts_created)}: {contact.display_name}",
             progress=i + 1,
             total=len(contacts_created),
+        )
+
+        # Delete old chunks for this contact (they'll be rebuilt from all messages)
+        await db.execute(
+            delete(ConversationChunk).where(
+                ConversationChunk.contact_id == contact.id
+            )
         )
 
         # Fetch all messages for this contact, ordered by time
@@ -187,9 +257,7 @@ async def ingest_telegram_export(
     logger.info(f"[INGEST] Created {total_chunks} conversation chunks")
 
     # ── Step 4: Embed chunks ──
-    await publish_status(
-        redis_client, user_id_str, "embedding", "Generating embeddings..."
-    )
+    await _status("embedding", "Generating embeddings...")
 
     # Fetch all unembedded chunks for this user
     stmt = (
@@ -201,12 +269,10 @@ async def ingest_telegram_export(
     result = await db.execute(stmt)
     unembedded = result.scalars().all()
 
-    batch_size = 64
+    batch_size = 16  # Small batches to stay within free-tier rate limits
     for i in range(0, len(unembedded), batch_size):
         batch = unembedded[i : i + batch_size]
-        await publish_status(
-            redis_client,
-            user_id_str,
+        await _status(
             "embedding",
             f"Embedding chunks {min(i + batch_size, len(unembedded))}/{len(unembedded)}",
             progress=min(i + batch_size, len(unembedded)),
@@ -214,7 +280,10 @@ async def ingest_telegram_export(
         )
 
         texts = [c.chunk_text for c in batch]
-        embeddings = await embed_texts(texts, input_type="document")
+        embeddings = await embed_texts(
+            texts, input_type="document",
+            user_id=user_id, operation="embedding_ingest",
+        )
 
         for chunk, emb in zip(batch, embeddings):
             chunk.embedding = emb
@@ -223,31 +292,59 @@ async def ingest_telegram_export(
 
     logger.info(f"[INGEST] Embedded {len(unembedded)} chunks")
 
-    # ── Step 5: Style analysis ──
-    await publish_status(
-        redis_client,
-        user_id_str,
-        "analyzing",
-        "Analyzing communication style per contact...",
-    )
+    # ── Step 5: Style analysis (DMs only) ──
+    dm_contacts = [c for c in contacts_created if c.chat_type == "personal_chat"]
+    skipped_count = len(contacts_created) - len(dm_contacts)
 
-    for i, contact in enumerate(contacts_created):
-        await publish_status(
-            redis_client,
-            user_id_str,
-            "analyzing",
-            f"Analyzing style for {contact.display_name} ({i + 1}/{len(contacts_created)})",
-            progress=i + 1,
-            total=len(contacts_created),
+    if skipped_count > 0:
+        logger.info(
+            f"[INGEST] Skipping style analysis for {skipped_count} non-DM contacts "
+            f"(groups/channels)"
         )
 
-        try:
-            style = await analyze_contact_style(db, user_id, contact, user_name)
-            contact.style_profile = style
-        except Exception as e:
-            logger.warning(
-                f"[INGEST] Style analysis failed for {contact.display_name}: {e}"
+    if not dm_contacts:
+        await _status(
+            "analyzing",
+            "No individual DMs to analyze — skipping style analysis.",
+        )
+    else:
+        cancel_key = f"ingest:cancel_analysis:{user_id_str}"
+        # Clear any stale cancel flag from a previous run
+        await redis_client.delete(cancel_key)
+
+        await _status(
+            "analyzing",
+            f"Analyzing communication style for {len(dm_contacts)} DM contacts "
+            f"(skipped {skipped_count} groups/channels)...",
+        )
+
+        for i, contact in enumerate(dm_contacts):
+            # Check for cancellation
+            if await redis_client.exists(cancel_key):
+                logger.info(f"[INGEST] Style analysis cancelled by user at {i}/{len(dm_contacts)}")
+                await _status(
+                    "analyzing",
+                    f"Style analysis stopped by user. Analyzed {i}/{len(dm_contacts)} contacts.",
+                    progress=i,
+                    total=len(dm_contacts),
+                )
+                await redis_client.delete(cancel_key)
+                break
+
+            await _status(
+                "analyzing",
+                f"Analyzing style for {contact.display_name} ({i + 1}/{len(dm_contacts)})",
+                progress=i + 1,
+                total=len(dm_contacts),
             )
+
+            try:
+                style = await analyze_contact_style(db, user_id, contact, user_name)
+                contact.style_profile = style
+            except Exception as e:
+                logger.warning(
+                    f"[INGEST] Style analysis failed for {contact.display_name}: {e}"
+                )
 
     await db.commit()
 
@@ -255,17 +352,29 @@ async def ingest_telegram_export(
     summary = {
         "chats": total_chats,
         "messages": total_messages,
+        "messages_skipped": total_skipped,
         "contacts": len(contacts_created),
         "chunks": total_chunks,
     }
 
-    await publish_status(
-        redis_client,
-        user_id_str,
+    await _status(
         "complete",
-        f"Ingestion complete! {total_chats} chats, {total_messages} messages, "
-        f"{total_chunks} chunks indexed.",
+        f"Ingestion complete! {total_chats} chats, {total_messages} new messages "
+        f"({total_skipped} duplicates skipped), {total_chunks} chunks indexed.",
     )
+
+    # Mark job complete in DB
+    if job_id:
+        from app.models.job import IngestionJob
+
+        stmt = select(IngestionJob).where(IngestionJob.id == job_id)
+        result = await db.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job:
+            job.status = "complete"
+            job.result = summary
+            job.messages_skipped = total_skipped
+            await db.commit()
 
     # Publish completion event separately
     import json as _json

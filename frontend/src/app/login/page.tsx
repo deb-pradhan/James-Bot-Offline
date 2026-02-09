@@ -39,13 +39,13 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+    <div className="flex min-h-screen items-center justify-center bg-surface-canvas p-4">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary text-primary-foreground text-2xl font-bold">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center bg-primary text-primary-foreground text-xl font-normal">
             J
           </div>
-          <CardTitle className="text-2xl">
+          <CardTitle className="text-h1">
             {isRegister ? "Create Account" : "Welcome Back"}
           </CardTitle>
           <CardDescription>
@@ -88,11 +88,11 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <div className="mt-4 text-center text-sm text-muted-foreground">
+          <div className="mt-4 text-center text-sm text-ink-secondary">
             {isRegister ? "Already have an account?" : "Don't have an account?"}{" "}
             <button
               onClick={() => setIsRegister(!isRegister)}
-              className="text-primary underline-offset-4 hover:underline"
+              className="text-primary hover:text-[#4B8AFF] transition-colors"
             >
               {isRegister ? "Sign In" : "Create Account"}
             </button>

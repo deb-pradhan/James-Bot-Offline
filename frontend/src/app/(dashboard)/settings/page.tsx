@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 
@@ -84,8 +83,8 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-muted-foreground">
+        <h1 className="text-h1 text-ink-primary">Settings</h1>
+        <p className="text-sm text-ink-secondary mt-1">
           Configure your Telegram connection and preferences
         </p>
       </div>
@@ -95,11 +94,11 @@ export default function SettingsPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
                 {isConnected ? (
-                  <Wifi className="h-5 w-5 text-green-500" />
+                  <Wifi className="h-4 w-4 text-signal-success" strokeWidth={1.5} />
                 ) : (
-                  <WifiOff className="h-5 w-5 text-amber-500" />
+                  <WifiOff className="h-4 w-4 text-signal-warning" strokeWidth={1.5} />
                 )}
                 Telegram Connection
               </CardTitle>
@@ -114,13 +113,13 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           {isConnected ? (
-            <div className="flex items-center gap-3 rounded-lg bg-green-50 p-4 dark:bg-green-950/20">
-              <CheckCircle2 className="h-5 w-5 text-green-500" />
+            <div className="flex items-center gap-3 border border-signal-success/20 bg-signal-success/5 p-4">
+              <CheckCircle2 className="h-5 w-5 text-signal-success" strokeWidth={1.5} />
               <div>
-                <p className="font-medium text-green-700 dark:text-green-300">
+                <p className="text-sm text-signal-success">
                   Telegram is connected
                 </p>
-                <p className="text-sm text-green-600 dark:text-green-400">
+                <p className="text-xs text-signal-success/70">
                   Live monitoring is active. New messages will appear in your
                   inbox.
                 </p>
@@ -131,16 +130,16 @@ export default function SettingsPage() {
               {/* Step 1: Credentials */}
               <div className="space-y-3">
                 <div>
-                  <p className="mb-1 text-sm font-medium">
+                  <p className="mb-1 text-sm text-ink-primary">
                     Step 1: Get API credentials from{" "}
                     <a
                       href="https://my.telegram.org"
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-primary hover:underline"
+                      className="text-primary hover:text-[#4B8AFF] transition-colors"
                     >
                       my.telegram.org
-                      <ExternalLink className="ml-1 inline h-3 w-3" />
+                      <ExternalLink className="ml-1 inline h-3 w-3" strokeWidth={1.5} />
                     </a>
                   </p>
                 </div>
@@ -170,7 +169,7 @@ export default function SettingsPage() {
                     disabled={loading || !apiId || !apiHash || !phone}
                   >
                     {loading ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
                     ) : null}
                     Send Verification Code
                   </Button>
@@ -179,8 +178,8 @@ export default function SettingsPage() {
 
               {/* Step 2: Enter Code */}
               {step === "code_sent" && (
-                <div className="space-y-3 border-t pt-4">
-                  <p className="text-sm font-medium">
+                <div className="space-y-3 border-t border-border-grid pt-4">
+                  <p className="text-sm text-ink-primary">
                     Step 2: Enter the verification code sent to your Telegram
                     app
                   </p>
@@ -196,7 +195,7 @@ export default function SettingsPage() {
                       disabled={loading || !code}
                     >
                       {loading ? (
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
                       ) : null}
                       Verify
                     </Button>
@@ -211,24 +210,24 @@ export default function SettingsPage() {
       {/* Account Info */}
       <Card>
         <CardHeader>
-          <CardTitle>Account</CardTitle>
+          <CardTitle className="text-sm">Account</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Name</span>
-            <span className="font-medium">{user?.name}</span>
+            <span className="text-label text-ink-tertiary">Name</span>
+            <span className="text-ink-primary">{user?.name}</span>
           </div>
-          <Separator />
+          <div className="border-t border-border-element" />
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Email</span>
-            <span className="font-medium">{user?.email}</span>
+            <span className="text-label text-ink-tertiary">Email</span>
+            <span className="text-ink-primary">{user?.email}</span>
           </div>
           {user?.telegram_user_id && (
             <>
-              <Separator />
+              <div className="border-t border-border-element" />
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Telegram ID</span>
-                <span className="font-medium">{user.telegram_user_id}</span>
+                <span className="text-label text-ink-tertiary">Telegram ID</span>
+                <span className="text-ink-primary font-mono">{user.telegram_user_id}</span>
               </div>
             </>
           )}

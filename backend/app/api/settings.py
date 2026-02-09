@@ -104,12 +104,20 @@ async def verify_telegram_code(
         await client.sign_in(phone, req.code, phone_code_hash=phone_code_hash)
         me = await client.get_me()
 
-        # Save session string
+        # Save session string + credentials to DB (persistent across restarts)
         session_string = client.session.save()
         user.telegram_session = session_string
         user.telegram_user_id = str(me.id)
+        user.telegram_api_id = pending["api_id"]
+        user.telegram_api_hash = pending["api_hash"]
 
-        # Store connection info in Redis for monitor
+        # Update user display name from Telegram profile
+        tg_name = " ".join(
+            filter(None, [me.first_name, me.last_name])
+        ) or me.username or user.name
+        user.name = tg_name
+
+        # Store connection info in Redis for monitor (immediate pickup)
         import json
         await redis_client.set(
             f"telegram:session:{user_id_str}",

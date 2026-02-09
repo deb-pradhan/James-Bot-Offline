@@ -89,28 +89,28 @@ export default function KnowledgePage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Knowledge Base</h1>
-        <p className="text-muted-foreground">
+        <h1 className="text-h1 text-ink-primary">Knowledge Base</h1>
+        <p className="text-sm text-ink-secondary mt-1">
           Upload documents and URLs to enrich the AI&apos;s context
         </p>
       </div>
 
-      {/* Upload Section */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* Upload Section — Bento Grid */}
+      <div className="grid gap-px bg-border-grid lg:grid-cols-2">
         {/* File Upload */}
-        <Card>
+        <Card className="border-0">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Upload className="h-4 w-4" /> Upload Documents
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Upload className="h-4 w-4 text-primary" strokeWidth={1.5} /> Upload Documents
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <label className="flex cursor-pointer flex-col items-center rounded-lg border-2 border-dashed p-8 transition-colors hover:border-primary/50 hover:bg-muted/50">
-              <FileText className="mb-3 h-10 w-10 text-muted-foreground" />
-              <p className="font-medium">
+            <label className="flex cursor-pointer flex-col items-center border-2 border-dashed border-border-grid p-8 transition-colors hover:border-primary/50 hover:bg-surface-subtle/50">
+              <FileText className="mb-3 h-10 w-10 text-ink-tertiary" strokeWidth={1.5} />
+              <p className="text-sm text-ink-primary">
                 {uploading ? "Uploading..." : "Drop files or click to upload"}
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">
+              <p className="mt-1 text-label text-ink-tertiary">
                 PDF, DOCX, TXT, MD
               </p>
               <input
@@ -126,10 +126,10 @@ export default function KnowledgePage() {
         </Card>
 
         {/* URL Ingest */}
-        <Card>
+        <Card className="border-0">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Globe className="h-4 w-4" /> Ingest from URL
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Globe className="h-4 w-4 text-primary" strokeWidth={1.5} /> Ingest from URL
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -144,11 +144,11 @@ export default function KnowledgePage() {
                 onClick={handleUrlIngest}
                 disabled={uploading || !urlInput.trim()}
               >
-                <LinkIcon className="mr-2 h-4 w-4" />
+                <LinkIcon className="mr-2 h-4 w-4" strokeWidth={1.5} />
                 Ingest
               </Button>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">
+            <p className="mt-2 text-xs text-ink-tertiary">
               We&apos;ll scrape the main content from the URL and index it
             </p>
           </CardContent>
@@ -158,8 +158,8 @@ export default function KnowledgePage() {
       {/* Documents Table */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">
-            Indexed Documents ({data?.total ?? 0})
+          <CardTitle className="text-sm">
+            Indexed Documents (<span className="font-mono">{data?.total ?? 0}</span>)
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -170,10 +170,11 @@ export default function KnowledgePage() {
               ))}
             </div>
           ) : documents.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
+            <p className="py-8 text-center text-sm text-ink-tertiary">
               No documents uploaded yet
             </p>
           ) : (
+            <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -188,7 +189,7 @@ export default function KnowledgePage() {
               <TableBody>
                 {documents.map((doc) => (
                   <TableRow key={doc.id}>
-                    <TableCell className="max-w-[200px] truncate font-medium">
+                    <TableCell className="max-w-[200px] truncate text-ink-primary">
                       {doc.filename}
                     </TableCell>
                     <TableCell>
@@ -203,8 +204,8 @@ export default function KnowledgePage() {
                         {doc.scope}
                       </Badge>
                     </TableCell>
-                    <TableCell>{doc.chunk_count}</TableCell>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell className="font-mono">{doc.chunk_count}</TableCell>
+                    <TableCell className="text-ink-tertiary">
                       {formatDistanceToNow(new Date(doc.uploaded_at), {
                         addSuffix: true,
                       })}
@@ -215,13 +216,14 @@ export default function KnowledgePage() {
                         size="icon"
                         onClick={() => handleDelete(doc.id, doc.filename)}
                       >
-                        <Trash2 className="h-4 w-4 text-destructive" />
+                        <Trash2 className="h-4 w-4 text-signal-error" strokeWidth={1.5} />
                       </Button>
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+            </div>
           )}
         </CardContent>
       </Card>

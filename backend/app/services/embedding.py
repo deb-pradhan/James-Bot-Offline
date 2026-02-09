@@ -1,85 +1,228 @@
 """
-Embedding service using Voyage AI API.
+Embedding service — OpenAI primary, Voyage AI fallback.
 
-Uses voyage-3-lite (512 dimensions) for cost-efficient embeddings.
-Calls the API directly via httpx for full async control.
+OpenAI: text-embedding-3-small (512 dimensions via `dimensions` param)
+Voyage: voyage-3-lite (512 dimensions natively)
+
+Both produce 512-dim vectors to match the pgvector column.
 """
 
+import asyncio
 import logging
+import uuid
 import httpx
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+OPENAI_API_URL = "https://api.openai.com/v1/embeddings"
 VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
-MAX_BATCH_SIZE = 128  # Voyage AI batch limit
+MAX_BATCH_SIZE = 128
+MAX_RETRIES = 5
+
+
+async def _call_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict,
+    payload: dict,
+    provider: str,
+) -> httpx.Response:
+    """POST with exponential backoff on 429s and 5xx errors."""
+    for attempt in range(MAX_RETRIES):
+        response = await client.post(url, headers=headers, json=payload)
+
+        if response.status_code == 429 or response.status_code >= 500:
+            wait = min(2 ** attempt * 5, 60)  # 5s, 10s, 20s, 40s, 60s
+            reason = "rate limited (429)" if response.status_code == 429 else f"server error ({response.status_code})"
+            logger.warning(
+                f"[EMBED] {provider} {reason}, "
+                f"waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})"
+            )
+            await asyncio.sleep(wait)
+            continue
+
+        return response
+
+    # Return last failed response so caller can handle fallback
+    return response  # type: ignore[possibly-undefined]
+
+
+async def _embed_openai(
+    texts: list[str], input_type: str
+) -> tuple[list[list[float]], int] | None:
+    """Try OpenAI embeddings. Returns (embeddings, token_count) or None on failure."""
+    if not settings.openai_api_key:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await _call_with_retry(
+                client,
+                OPENAI_API_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={
+                    "model": settings.openai_embedding_model,
+                    "input": texts,
+                    "dimensions": settings.embedding_dimension,
+                    "encoding_format": "float",
+                },
+                provider="OpenAI",
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    f"[EMBED] OpenAI failed ({response.status_code}), "
+                    f"falling back to Voyage AI"
+                )
+                return None
+
+            data = response.json()
+            embeddings = [item["embedding"] for item in data["data"]]
+            tokens = data.get("usage", {}).get("total_tokens", 0)
+            if isinstance(tokens, str):
+                tokens = 0
+            logger.info(f"[EMBED] OpenAI batch done, tokens: {tokens}")
+            return embeddings, tokens
+
+    except Exception as e:
+        logger.warning(f"[EMBED] OpenAI error: {e}, falling back to Voyage AI")
+        return None
+
+
+async def _embed_voyage(
+    texts: list[str], input_type: str
+) -> tuple[list[list[float]], int]:
+    """Voyage AI embeddings (fallback). Returns (embeddings, token_count). Raises on failure."""
+    if not settings.voyageai_api_key:
+        raise RuntimeError(
+            "No embedding provider available: "
+            "both OPENAI_API_KEY and VOYAGEAI_API_KEY are missing"
+        )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await _call_with_retry(
+            client,
+            VOYAGE_API_URL,
+            headers={
+                "Authorization": f"Bearer {settings.voyageai_api_key}",
+                "Content-Type": "application/json",
+            },
+            payload={
+                "model": settings.voyageai_embedding_model,
+                "input": texts,
+                "input_type": input_type,
+            },
+            provider="Voyage",
+        )
+
+        if response.status_code != 200:
+            logger.error(
+                f"[EMBED] Voyage AI failed: {response.status_code} - {response.text}"
+            )
+            raise RuntimeError(
+                f"Voyage AI embedding failed: {response.status_code}"
+            )
+
+        data = response.json()
+        embeddings = [item["embedding"] for item in data["data"]]
+        tokens = data.get("usage", {}).get("total_tokens", 0)
+        if isinstance(tokens, str):
+            tokens = 0
+        logger.info(f"[EMBED] Voyage batch done, tokens: {tokens}")
+        return embeddings, tokens
 
 
 async def embed_texts(
     texts: list[str],
     input_type: str = "document",
+    *,
+    user_id: uuid.UUID | None = None,
+    operation: str | None = None,
 ) -> list[list[float]]:
     """
-    Embed a list of texts using Voyage AI.
+    Embed texts using OpenAI (primary) with Voyage AI fallback.
 
     Args:
         texts: List of strings to embed
         input_type: "document" for stored content, "query" for search queries
+        user_id: If provided with operation, records cost to api_usage table
+        operation: Operation label for cost tracking
 
     Returns:
-        List of embedding vectors (each is a list of floats)
+        List of embedding vectors (512 dimensions each)
     """
     if not texts:
         return []
 
-    if not settings.voyageai_api_key:
-        raise ValueError("VOYAGEAI_API_KEY not configured")
-
-    all_embeddings: list[list[float]] = []
-
-    # Process in batches
-    for i in range(0, len(texts), MAX_BATCH_SIZE):
-        batch = texts[i : i + MAX_BATCH_SIZE]
-        logger.info(
-            f"[EMBED] Embedding batch {i // MAX_BATCH_SIZE + 1}, "
-            f"size={len(batch)}, type={input_type}"
+    if not settings.openai_api_key and not settings.voyageai_api_key:
+        raise ValueError(
+            "No embedding API key configured. "
+            "Set OPENAI_API_KEY or VOYAGEAI_API_KEY."
         )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                VOYAGE_API_URL,
-                headers={
-                    "Authorization": f"Bearer {settings.voyageai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.embedding_model,
-                    "input": batch,
-                    "input_type": input_type,
-                },
-            )
+    all_embeddings: list[list[float]] = []
+    openai_tokens = 0
+    voyage_tokens = 0
 
-            if response.status_code != 200:
-                logger.error(
-                    f"[EMBED] Voyage AI API error: {response.status_code} - {response.text}"
-                )
-                raise RuntimeError(
-                    f"Voyage AI embedding failed: {response.status_code}"
-                )
+    for i in range(0, len(texts), MAX_BATCH_SIZE):
+        batch = texts[i : i + MAX_BATCH_SIZE]
+        batch_num = i // MAX_BATCH_SIZE + 1
+        logger.info(
+            f"[EMBED] Batch {batch_num}, size={len(batch)}, type={input_type}"
+        )
 
-            data = response.json()
-            batch_embeddings = [item["embedding"] for item in data["data"]]
-            all_embeddings.extend(batch_embeddings)
+        # Try OpenAI first
+        openai_result = await _embed_openai(batch, input_type)
 
-            tokens_used = data.get("usage", {}).get("total_tokens", "?")
-            logger.info(f"[EMBED] Batch complete, tokens used: {tokens_used}")
+        if openai_result is not None:
+            embeddings, tokens = openai_result
+            openai_tokens += tokens
+            all_embeddings.extend(embeddings)
+        else:
+            # Fall back to Voyage AI
+            embeddings, tokens = await _embed_voyage(batch, input_type)
+            voyage_tokens += tokens
+            all_embeddings.extend(embeddings)
 
     logger.info(f"[EMBED] Total embeddings generated: {len(all_embeddings)}")
+
+    # Record cost if caller provided tracking context
+    if user_id and operation:
+        from app.services.cost_tracker import record_embedding_usage
+
+        if openai_tokens > 0:
+            await record_embedding_usage(
+                user_id=user_id,
+                provider="openai",
+                model=settings.openai_embedding_model,
+                total_tokens=openai_tokens,
+                operation=operation,
+            )
+        if voyage_tokens > 0:
+            await record_embedding_usage(
+                user_id=user_id,
+                provider="voyageai",
+                model=settings.voyageai_embedding_model,
+                total_tokens=voyage_tokens,
+                operation=operation,
+            )
+
     return all_embeddings
 
 
-async def embed_query(text: str) -> list[float]:
+async def embed_query(
+    text: str,
+    *,
+    user_id: uuid.UUID | None = None,
+    operation: str | None = None,
+) -> list[float]:
     """Embed a single query text for similarity search."""
-    results = await embed_texts([text], input_type="query")
+    results = await embed_texts(
+        [text], input_type="query", user_id=user_id, operation=operation
+    )
     return results[0]

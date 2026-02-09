@@ -40,7 +40,9 @@ async def retrieve_relevant_chunks(
     )
 
     # Embed the query
-    query_embedding = await embed_query(query_text)
+    query_embedding = await embed_query(
+        query_text, user_id=user_id, operation="embedding_query"
+    )
 
     # ── Conversation chunks ──
     conversation_results = []
@@ -50,13 +52,13 @@ async def retrieve_relevant_chunks(
         conv_query = text("""
             SELECT cc.id, cc.chunk_text, cc.session_start, cc.session_end,
                    cc.message_count, c.display_name,
-                   1 - (cc.embedding <=> :embedding::vector) AS score
+                   1 - (cc.embedding <=> CAST(:embedding AS vector)) AS score
             FROM conversation_chunks cc
             JOIN contacts c ON cc.contact_id = c.id
             WHERE c.user_id = :user_id
               AND cc.contact_id = :contact_id
               AND cc.embedding IS NOT NULL
-            ORDER BY cc.embedding <=> :embedding::vector
+            ORDER BY cc.embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """)
         result = await db.execute(
@@ -73,12 +75,12 @@ async def retrieve_relevant_chunks(
         conv_query = text("""
             SELECT cc.id, cc.chunk_text, cc.session_start, cc.session_end,
                    cc.message_count, c.display_name,
-                   1 - (cc.embedding <=> :embedding::vector) AS score
+                   1 - (cc.embedding <=> CAST(:embedding AS vector)) AS score
             FROM conversation_chunks cc
             JOIN contacts c ON cc.contact_id = c.id
             WHERE c.user_id = :user_id
               AND cc.embedding IS NOT NULL
-            ORDER BY cc.embedding <=> :embedding::vector
+            ORDER BY cc.embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """)
         result = await db.execute(
@@ -115,13 +117,13 @@ async def retrieve_relevant_chunks(
             # Contact-scoped docs + general docs
             doc_query = text("""
                 SELECT dc.id, dc.chunk_text, dc.chunk_index, d.filename,
-                       1 - (dc.embedding <=> :embedding::vector) AS score
+                       1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score
                 FROM document_chunks dc
                 JOIN documents d ON dc.document_id = d.id
                 WHERE d.user_id = :user_id
                   AND (d.contact_id = :contact_id OR d.scope = 'general')
                   AND dc.embedding IS NOT NULL
-                ORDER BY dc.embedding <=> :embedding::vector
+                ORDER BY dc.embedding <=> CAST(:embedding AS vector)
                 LIMIT :top_k
             """)
             result = await db.execute(
@@ -136,12 +138,12 @@ async def retrieve_relevant_chunks(
         else:
             doc_query = text("""
                 SELECT dc.id, dc.chunk_text, dc.chunk_index, d.filename,
-                       1 - (dc.embedding <=> :embedding::vector) AS score
+                       1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score
                 FROM document_chunks dc
                 JOIN documents d ON dc.document_id = d.id
                 WHERE d.user_id = :user_id
                   AND dc.embedding IS NOT NULL
-                ORDER BY dc.embedding <=> :embedding::vector
+                ORDER BY dc.embedding <=> CAST(:embedding AS vector)
                 LIMIT :top_k
             """)
             result = await db.execute(

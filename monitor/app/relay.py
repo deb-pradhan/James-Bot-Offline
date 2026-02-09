@@ -45,6 +45,15 @@ class RedisRelay:
         await self.redis.publish(f"user:{user_id}:events", json.dumps(event))
         logger.info(f"[RELAY] Published new message from {message_data.get('sender_name')}")
 
+    async def publish_sync_message(self, user_id: str, message_data: dict):
+        """Publish a sync message — consumer pipeline only, no WebSocket event.
+
+        Used during initial sync to avoid flooding the frontend with
+        thousands of new_message events.
+        """
+        payload = json.dumps({"user_id": user_id, **message_data})
+        await self.redis.publish("telegram:new_messages", payload)
+
     async def publish_status(self, user_id: str, event_type: str, data: dict):
         """Publish Telegram connection status."""
         payload = json.dumps({"type": event_type, "data": data})

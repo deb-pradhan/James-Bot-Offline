@@ -7,6 +7,7 @@ Anthropic Claude API wrapper for all LLM operations:
 """
 
 import logging
+import uuid
 from anthropic import AsyncAnthropic
 from app.config import get_settings
 
@@ -30,8 +31,15 @@ async def generate_response(
     user_prompt: str,
     max_tokens: int = 1024,
     temperature: float = 0.7,
+    *,
+    user_id: uuid.UUID | None = None,
+    operation: str | None = None,
 ) -> str:
-    """Generic Claude call with system + user prompt."""
+    """Generic Claude call with system + user prompt.
+
+    If user_id and operation are provided, records token usage and cost
+    to the api_usage table.
+    """
     client = get_client()
 
     logger.info(
@@ -55,6 +63,18 @@ async def generate_response(
         f"[LLM] Response generated: {tokens_in} input tokens, "
         f"{tokens_out} output tokens"
     )
+
+    # Record cost if caller provided tracking context
+    if user_id and operation:
+        from app.services.cost_tracker import record_llm_usage
+
+        await record_llm_usage(
+            user_id=user_id,
+            model=settings.anthropic_model,
+            operation=operation,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+        )
 
     return response_text
 

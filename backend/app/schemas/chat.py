@@ -17,3 +17,8 @@ class SourceChunk(BaseModel):
     text_preview: str
     timestamp: str | None = None
     relevance_score: float
+
+
+class ChatSuggestionsResponse(BaseModel):
+    suggestions: list[str]
+    personalized: bool  # True if based on actual user data

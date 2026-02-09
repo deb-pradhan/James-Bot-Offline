@@ -35,6 +35,15 @@ class ParsedChat:
     messages: list[ParsedMessage] = field(default_factory=list)
 
 
+@dataclass
+class ExportMetadata:
+    """Summary info about the parsed export for history tracking."""
+    chat_date_start: datetime | None = None
+    chat_date_end: datetime | None = None
+    total_messages: int = 0
+    total_chats: int = 0
+
+
 def extract_text(text_field) -> str:
     """Extract plain text from Telegram's text field (can be str or list)."""
     if isinstance(text_field, str):
@@ -50,12 +59,12 @@ def extract_text(text_field) -> str:
     return ""
 
 
-def parse_telegram_export(data: dict) -> tuple[list[ParsedChat], str]:
+def parse_telegram_export(data: dict) -> tuple[list[ParsedChat], str, ExportMetadata]:
     """
     Parse Telegram export JSON.
 
     Returns:
-        (list of parsed chats, detected self user ID)
+        (list of parsed chats, detected self user ID, export metadata)
     """
     chats_data = []
 
@@ -125,8 +134,8 @@ def parse_telegram_export(data: dict) -> tuple[list[ParsedChat], str]:
             messages.append(
                 ParsedMessage(
                     telegram_msg_id=msg.get("id", 0),
-                    sender_name=msg.get("from", "Unknown"),
-                    sender_id=msg.get("from_id", ""),
+                sender_name=msg.get("from") or "Unknown",
+                sender_id=msg.get("from_id") or "",
                     text=text,
                     sent_at=sent_at,
                     raw_data=msg,
@@ -148,4 +157,14 @@ def parse_telegram_export(data: dict) -> tuple[list[ParsedChat], str]:
         f"[INGEST] Parsed {len(parsed_chats)} chats, "
         f"{total_msgs} messages, {skipped_msgs} skipped (no text/date)"
     )
-    return parsed_chats, self_user_id
+
+    # Compute date range across all messages
+    all_dates = [m.sent_at for c in parsed_chats for m in c.messages]
+    metadata = ExportMetadata(
+        chat_date_start=min(all_dates) if all_dates else None,
+        chat_date_end=max(all_dates) if all_dates else None,
+        total_messages=total_msgs,
+        total_chats=len(parsed_chats),
+    )
+
+    return parsed_chats, self_user_id, metadata

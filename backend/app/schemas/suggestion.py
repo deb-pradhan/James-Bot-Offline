@@ -26,3 +26,4 @@ class GenerateRequest(BaseModel):
 
 class EditSuggestionRequest(BaseModel):
     text: str
+    mode: str = "draft"  # "draft" or "send"

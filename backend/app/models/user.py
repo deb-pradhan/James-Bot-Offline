@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, JSON, Boolean, Text
+from sqlalchemy import String, DateTime, JSON, Boolean, Text, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -22,6 +22,12 @@ class User(Base):
     )
     telegram_session: Mapped[str | None] = mapped_column(
         Text, nullable=True
+    )
+    telegram_api_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    telegram_api_hash: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
     )
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

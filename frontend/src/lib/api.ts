@@ -68,6 +68,7 @@ export const api = {
   dashboard: {
     overview: () => request("/api/dashboard/overview"),
     unresponded: () => request("/api/dashboard/unresponded"),
+    costs: () => request("/api/dashboard/costs"),
   },
 
   // ── Contacts ──
@@ -87,6 +88,8 @@ export const api = {
       if (params?.offset) qs.set("offset", String(params.offset));
       return request(`/api/contacts/${id}/messages?${qs}`);
     },
+    summary: (id: string) =>
+      request<{ summary: string; message_count: number }>(`/api/contacts/${id}/summary`),
     updateSettings: (id: string, data: { auto_respond?: boolean; display_name?: string }) =>
       request(`/api/contacts/${id}/settings`, {
         method: "PATCH",
@@ -107,12 +110,12 @@ export const api = {
       }),
     generateAll: () =>
       request("/api/suggestions/generate-all", { method: "POST" }),
-    approve: (id: string) =>
-      request(`/api/suggestions/${id}/approve`, { method: "POST" }),
-    edit: (id: string, text: string) =>
+    approve: (id: string, mode: "draft" | "send" = "draft") =>
+      request(`/api/suggestions/${id}/approve?mode=${mode}`, { method: "POST" }),
+    edit: (id: string, text: string, mode: "draft" | "send" = "draft") =>
       request(`/api/suggestions/${id}/edit`, {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, mode }),
       }),
     reject: (id: string) =>
       request(`/api/suggestions/${id}`, { method: "DELETE" }),
@@ -124,7 +127,13 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       if (selfUserId) form.append("self_user_id", selfUserId);
-      return request("/api/ingest/telegram", {
+      return request<{
+        job_id: string;
+        status: string;
+        message: string;
+        duplicate_warning: string | null;
+        overlap_warning: string | null;
+      }>("/api/ingest/telegram", {
         method: "POST",
         body: form,
       });
@@ -144,6 +153,42 @@ export const api = {
         method: "POST",
         body: JSON.stringify(data),
       }),
+    status: () =>
+      request<{
+        job_id: string;
+        status: string;
+        step: string | null;
+        progress: number | null;
+        total: number | null;
+        message: string | null;
+        result: Record<string, number> | null;
+      } | null>("/api/ingest/active"),
+    stopAnalysis: () =>
+      request<{ status: string; message: string }>("/api/ingest/stop-analysis", {
+        method: "POST",
+      }),
+    history: (params?: { limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      return request<{
+        items: Array<{
+          job_id: string;
+          status: string;
+          filename: string | null;
+          file_hash: string | null;
+          chat_date_start: string | null;
+          chat_date_end: string | null;
+          total_messages_in_file: number | null;
+          messages_new: number | null;
+          messages_skipped: number | null;
+          total_chats: number | null;
+          total_chunks: number | null;
+          ingested_at: string;
+        }>;
+        total: number;
+      }>(`/api/ingest/history?${qs}`);
+    },
   },
 
   // ── Chat/Query ──
@@ -153,6 +198,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ question, contact_id: contactId }),
       }),
+    suggestions: () => request("/api/chat/suggestions"),
   },
 
   // ── Documents ──

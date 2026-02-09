@@ -22,9 +22,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-20250514"
 
-    # Voyage AI Embeddings
+    # Embeddings (OpenAI primary, Voyage AI fallback)
+    openai_api_key: str = ""
+    openai_embedding_model: str = "text-embedding-3-small"
     voyageai_api_key: str = ""
-    embedding_model: str = "voyage-3-lite"
+    voyageai_embedding_model: str = "voyage-3-lite"
     embedding_dimension: int = 512
 
     # Telegram (for in-app auth flow)

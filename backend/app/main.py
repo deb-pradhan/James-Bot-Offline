@@ -2,14 +2,21 @@
 James Bot — FastAPI application entry point.
 """
 
+import asyncio
+import json
 import logging
 import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import redis.asyncio as aioredis
+from sqlalchemy import select
+
 from app.config import get_settings
-from app.database import init_db, close_db
+from app.database import init_db, close_db, async_session
 from app.api.router import api_router
+from app.models.user import User
+from app.services.message_consumer import start_message_consumer
 
 # ── Logging Setup ──
 logging.basicConfig(
@@ -21,10 +28,70 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Background task handle
+_consumer_task: asyncio.Task | None = None
+
+
+async def restore_telegram_sessions():
+    """
+    Restore Telegram session data from PostgreSQL into Redis
+    so the monitor service can pick them up immediately on restart.
+    """
+    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+
+    try:
+        async with async_session() as db:
+            stmt = select(User).where(
+                User.telegram_session.isnot(None),
+                User.telegram_api_id.isnot(None),
+                User.telegram_api_hash.isnot(None),
+            )
+            result = await db.execute(stmt)
+            users = result.scalars().all()
+
+            restored = 0
+            for user in users:
+                user_id_str = str(user.id)
+
+                # Check if already connected (don't overwrite an active session)
+                connected = await redis_client.get(f"telegram:connected:{user_id_str}")
+                if connected == "true":
+                    logger.info(f"[STARTUP] User {user.email} already connected, skipping restore")
+                    continue
+
+                # Push session data into Redis
+                session_data = json.dumps({
+                    "session_string": user.telegram_session,
+                    "api_id": user.telegram_api_id,
+                    "api_hash": user.telegram_api_hash,
+                })
+                await redis_client.set(f"telegram:session:{user_id_str}", session_data)
+
+                # Notify monitor that a session is available
+                await redis_client.publish(
+                    "telegram:session_updated",
+                    json.dumps({"user_id": user_id_str}),
+                )
+
+                restored += 1
+                logger.info(f"[STARTUP] Restored Telegram session for {user.email}")
+
+            if restored:
+                logger.info(f"[STARTUP] Restored {restored} Telegram session(s) from DB")
+            else:
+                logger.info("[STARTUP] No Telegram sessions to restore")
+
+    except Exception as e:
+        logger.error(f"[STARTUP] Failed to restore sessions: {e}", exc_info=True)
+    finally:
+        await redis_client.close()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
+    global _consumer_task
+
     logger.info("=" * 60)
     logger.info(f"  Starting {settings.app_name}")
     logger.info(f"  Debug: {settings.debug}")
@@ -49,9 +116,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[STARTUP] Alembic migration skipped: {e}")
 
+    # Restore Telegram sessions from DB → Redis
+    await restore_telegram_sessions()
+
+    # Start real-time message consumer (persists live messages + embeds)
+    _consumer_task = asyncio.create_task(start_message_consumer())
+    logger.info("[STARTUP] Message consumer started")
+
     yield
 
     # Shutdown
+    if _consumer_task:
+        _consumer_task.cancel()
+        try:
+            await _consumer_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("[SHUTDOWN] Message consumer stopped")
+
     await close_db()
     logger.info("[SHUTDOWN] Database connections closed")
 
