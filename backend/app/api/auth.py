@@ -1,4 +1,4 @@
-"""Auth routes: register, login."""
+"""Auth routes: register, login, password reset."""
 
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,10 +9,20 @@ from app.models.user import User
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    MessageResponse,
     TokenResponse,
     UserResponse,
 )
-from app.utils.auth import hash_password, verify_password, create_access_token
+from app.utils.auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    create_reset_token,
+    decode_reset_token,
+)
+from app.utils.email import send_password_reset_email
 from app.api.deps import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -85,6 +95,64 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             created_at=user.created_at,
         ),
     )
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Request a password reset email."""
+    logger.info(f"[AUTH] Password reset requested for: {req.email}")
+
+    stmt = select(User).where(User.email == req.email)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    # Always return success to prevent email enumeration
+    if not user:
+        logger.info(f"[AUTH] Password reset for unknown email: {req.email}")
+        return MessageResponse(message="If an account with that email exists, a reset link has been sent.")
+
+    token = create_reset_token(str(user.id), user.hashed_password)
+    await send_password_reset_email(user.email, token)
+
+    return MessageResponse(message="If an account with that email exists, a reset link has been sent.")
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Reset password using a valid reset token."""
+    payload = decode_reset_token(req.token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset link",
+        )
+
+    user_id = payload.get("sub")
+    phash_fragment = payload.get("phash")
+
+    stmt = select(User).where(User.id == user_id)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset link",
+        )
+
+    # Verify the token was issued for the current password
+    # (invalidates token if password was already changed)
+    if user.hashed_password[:16] != phash_fragment:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This reset link has already been used",
+        )
+
+    user.hashed_password = hash_password(req.password)
+    await db.commit()
+    logger.info(f"[AUTH] Password reset successful for: {user.email}")
+
+    return MessageResponse(message="Password has been reset successfully. You can now sign in.")
 
 
 @router.get("/me", response_model=UserResponse)

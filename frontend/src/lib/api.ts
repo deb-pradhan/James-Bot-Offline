@@ -62,6 +62,16 @@ export const api = {
         body: JSON.stringify(data),
       }),
     me: () => request("/api/auth/me"),
+    forgotPassword: (data: { email: string }) =>
+      request<{ message: string }>("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    resetPassword: (data: { token: string; password: string }) =>
+      request<{ message: string }>("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
   },
 
   // ── Dashboard ──

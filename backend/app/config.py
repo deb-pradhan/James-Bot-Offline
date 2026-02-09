@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     telegram_api_hash: str = ""
     telegram_phone: str = ""
 
+    # Password Reset / Email
+    frontend_url: str = "http://localhost:3000"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "James Bot"
+    reset_token_expire_minutes: int = 15
+
     # CORS
     cors_origins: str = "http://localhost:3000"
 

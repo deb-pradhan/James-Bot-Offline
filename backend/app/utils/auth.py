@@ -34,3 +34,36 @@ def decode_access_token(token: str) -> str | None:
     except JWTError:
         logger.warning("Invalid JWT token")
         return None
+
+
+def create_reset_token(user_id: str, password_hash: str) -> str:
+    """Create a short-lived JWT for password reset.
+
+    Embeds a fragment of the current password hash so the token
+    auto-invalidates once the password is changed.
+    """
+    expire = datetime.utcnow() + timedelta(
+        minutes=settings.reset_token_expire_minutes
+    )
+    payload = {
+        "sub": user_id,
+        "purpose": "password_reset",
+        "phash": password_hash[:16],  # first 16 chars as fingerprint
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_reset_token(token: str) -> dict | None:
+    """Decode a password-reset JWT. Returns {"sub": user_id, "phash": ...} or None."""
+    try:
+        payload = jwt.decode(
+            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+        )
+        if payload.get("purpose") != "password_reset":
+            logger.warning("Token is not a password reset token")
+            return None
+        return payload
+    except JWTError:
+        logger.warning("Invalid reset token")
+        return None
