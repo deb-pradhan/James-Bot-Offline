@@ -22,6 +22,7 @@ class SuggestionListResponse(BaseModel):
 
 class GenerateRequest(BaseModel):
     contact_id: str
+    user_instruction: str | None = None  # Optional custom instruction to guide AI generation
 
 
 class EditSuggestionRequest(BaseModel):

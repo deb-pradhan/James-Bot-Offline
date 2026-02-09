@@ -17,10 +17,20 @@ logger = logging.getLogger(__name__)
 # ── Pricing per 1M tokens (USD) ─────────────────────────────────
 # Keyed by (service, model) — input and output rates
 PRICING = {
+    # Anthropic Claude 3.5 Haiku
+    ("anthropic", "claude-3-5-haiku-20241022"): {
+        "input": 0.80,
+        "output": 4.00,
+    },
     # Anthropic Claude Sonnet 4
     ("anthropic", "claude-sonnet-4-20250514"): {
         "input": 3.00,
         "output": 15.00,
+    },
+    # Anthropic Claude 4 Opus
+    ("anthropic", "claude-4-opus-20250514"): {
+        "input": 15.00,
+        "output": 75.00,
     },
     # OpenAI embeddings
     ("openai", "text-embedding-3-small"): {

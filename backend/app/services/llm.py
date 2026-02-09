@@ -34,21 +34,25 @@ async def generate_response(
     *,
     user_id: uuid.UUID | None = None,
     operation: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Generic Claude call with system + user prompt.
 
     If user_id and operation are provided, records token usage and cost
     to the api_usage table.
+
+    model: optional override — falls back to config default.
     """
     client = get_client()
+    active_model = model or settings.anthropic_model
 
     logger.info(
-        f"[LLM] Generating response, model={settings.anthropic_model}, "
+        f"[LLM] Generating response, model={active_model}, "
         f"max_tokens={max_tokens}, temp={temperature}"
     )
 
     message = await client.messages.create(
-        model=settings.anthropic_model,
+        model=active_model,
         max_tokens=max_tokens,
         temperature=temperature,
         system=system_prompt,
@@ -70,7 +74,7 @@ async def generate_response(
 
         await record_llm_usage(
             user_id=user_id,
-            model=settings.anthropic_model,
+            model=active_model,
             operation=operation,
             input_tokens=tokens_in,
             output_tokens=tokens_out,
@@ -103,7 +107,7 @@ Your task is to write a response that perfectly mimics {user_name}'s communicati
 
 GHOSTWRITE_USER = """## Recent Conversation (newest last):
 {recent_messages}
-
+{user_instruction}
 ## Task:
 Write {user_name}'s next message in this conversation. Respond naturally as {user_name} would.
 Output ONLY the message text — no quotes, no labels, nothing else."""

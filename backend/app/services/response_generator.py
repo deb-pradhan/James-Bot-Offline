@@ -30,6 +30,8 @@ async def generate_reply(
     user_id: uuid.UUID,
     contact_id: uuid.UUID,
     user_name: str,
+    user_instruction: str | None = None,
+    model: str | None = None,
 ) -> ResponseSuggestion:
     """
     Generate a ghostwritten reply for a specific contact.
@@ -93,9 +95,15 @@ async def generate_reply(
         document_context=doc_context or "No relevant documents found.",
     )
 
+    # Build user instruction section if provided
+    instruction_block = ""
+    if user_instruction:
+        instruction_block = f"\n\n## User's Direction:\n{user_instruction}\nFollow this direction while staying in character as {user_name}."
+
     user_prompt = GHOSTWRITE_USER.format(
         recent_messages=recent_formatted,
         user_name=user_name,
+        user_instruction=instruction_block,
     )
 
     # Generate with Claude
@@ -106,6 +114,7 @@ async def generate_reply(
         temperature=0.7,
         user_id=user_id,
         operation="ghostwrite",
+        model=model,
     )
 
     # Store suggestion
@@ -133,6 +142,7 @@ async def query_chat_history(
     question: str,
     user_name: str,
     contact_id: uuid.UUID | None = None,
+    model: str | None = None,
 ) -> dict:
     """
     Answer a natural language question about chat history using RAG.
@@ -164,6 +174,7 @@ async def query_chat_history(
         temperature=0.3,  # Lower temp for factual answers
         user_id=user_id,
         operation="query",
+        model=model,
     )
 
     # Build source citations

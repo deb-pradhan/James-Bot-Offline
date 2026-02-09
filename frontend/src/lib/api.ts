@@ -113,10 +113,13 @@ export const api = {
       const qs = status ? `?status=${status}` : "";
       return request(`/api/suggestions${qs}`);
     },
-    generate: (contactId: string) =>
+    generate: (contactId: string, userInstruction?: string) =>
       request("/api/suggestions/generate", {
         method: "POST",
-        body: JSON.stringify({ contact_id: contactId }),
+        body: JSON.stringify({
+          contact_id: contactId,
+          ...(userInstruction ? { user_instruction: userInstruction } : {}),
+        }),
       }),
     generateAll: () =>
       request("/api/suggestions/generate-all", { method: "POST" }),
@@ -236,10 +239,28 @@ export const api = {
         body: JSON.stringify(data),
       }),
     telegramStatus: () => request("/api/settings/telegram/status"),
+    getPreferences: () =>
+      request<{ settings: Record<string, unknown> }>("/api/auth/me").then(
+        (user: Record<string, unknown>) =>
+          (user.settings as Record<string, unknown>) ?? {}
+      ),
     updatePreferences: (prefs: Record<string, unknown>) =>
       request("/api/settings/preferences", {
         method: "PUT",
         body: JSON.stringify(prefs),
       }),
+    availableModels: () =>
+      request<{
+        models: Array<{
+          id: string;
+          name: string;
+          description: string;
+          tier: string;
+          input_cost_per_m: number;
+          output_cost_per_m: number;
+        }>;
+        current: string;
+        default: string;
+      }>("/api/settings/available-models"),
   },
 };

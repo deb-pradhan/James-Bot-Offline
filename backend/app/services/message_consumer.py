@@ -212,6 +212,7 @@ async def _auto_generate_suggestion(
     user_id: uuid.UUID,
     contact_id: uuid.UUID,
     contact_name: str,
+    auto_draft: bool = True,
 ):
     """Auto-generate a response suggestion for a new incoming message.
 
@@ -258,10 +259,10 @@ async def _auto_generate_suggestion(
             # Look up contact's telegram_id so we can save draft
             contact = await db.get(Contact, contact_id)
 
-            # Auto-save as Telegram draft immediately
             redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
             try:
-                if contact:
+                # Auto-save as Telegram draft only if auto_draft is enabled
+                if auto_draft and contact:
                     await redis_client.publish(
                         "telegram:send_commands",
                         json.dumps(
@@ -280,6 +281,7 @@ async def _auto_generate_suggestion(
                     )
 
                 # Notify frontend
+                status_msg = f"Draft saved for {contact_name}" if auto_draft else f"Suggestion ready for {contact_name}"
                 await redis_client.publish(
                     f"user:{str(user_id)}:events",
                     json.dumps(
@@ -290,7 +292,7 @@ async def _auto_generate_suggestion(
                                 "contact_id": str(contact_id),
                                 "contact_name": contact_name,
                             },
-                            "message": f"Draft saved for {contact_name}",
+                            "message": status_msg,
                         }
                     ),
                 )
@@ -361,11 +363,20 @@ async def _process_message(msg_data: dict):
 
             # Auto-generate suggestion ONLY for real-time incoming DMs
             # Skip: bulk sync, groups, supergroups, channels, bots
+            # Also skip if user has disabled auto_generate in preferences
             is_dm = contact.chat_type in ("personal_chat",)
             if is_incoming and not is_sync and is_dm:
-                asyncio.create_task(
-                    _auto_generate_suggestion(user_id, contact.id, chat_name)
-                )
+                from app.models.user import User as UserModel
+                user_obj = await db.get(UserModel, user_id)
+                user_prefs = (user_obj.settings or {}) if user_obj else {}
+                auto_generate = user_prefs.get("auto_generate", True)
+                auto_draft = user_prefs.get("auto_draft", True)
+                if auto_generate:
+                    asyncio.create_task(
+                        _auto_generate_suggestion(
+                            user_id, contact.id, chat_name, auto_draft=auto_draft
+                        )
+                    )
 
             # Track pending re-chunks
             count = _pending_rechunk.get(contact.id, 0) + 1

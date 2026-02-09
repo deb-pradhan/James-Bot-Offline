@@ -27,6 +27,7 @@ from app.schemas.ingest import (
 from app.services.ingestion import ingest_telegram_export
 from app.services.document_parser import parse_document, chunk_document_text
 from app.services.embedding import embed_texts
+from app.api.deps import get_user_llm_model
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingest"])
@@ -84,6 +85,7 @@ async def upload_telegram_export(
     await db.refresh(job)
     job_id = job.id
     upload_filename = file.filename
+    user_model = get_user_llm_model(user)
 
     # Run ingestion in background (using asyncio.create_task for now)
     import asyncio
@@ -101,6 +103,7 @@ async def upload_telegram_export(
                     self_user_id_override=self_user_id or None,
                     job_id=job_id,
                     filename=upload_filename,
+                    model=user_model,
                 )
                 await bg_db.commit()
                 logger.info(f"[INGEST] Job {job_id} completed: {result}")

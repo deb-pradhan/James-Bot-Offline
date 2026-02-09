@@ -53,3 +53,14 @@ async def get_current_user(
         )
 
     return user
+
+
+def get_user_llm_model(user: User) -> str | None:
+    """Extract user's preferred LLM model from settings, or None for default."""
+    user_settings = user.settings or {}
+    model = user_settings.get("llm_model")
+    if model:
+        valid_ids = [m["id"] for m in settings.available_models]
+        if model in valid_ids:
+            return model
+    return None

@@ -12,6 +12,7 @@ from telethon.sessions import StringSession
 from app.database import get_db
 from app.api.deps import get_current_user, get_redis
 from app.models.user import User
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -165,6 +166,21 @@ async def telegram_status(
         phone=None,
         user_id=user.telegram_user_id,
     )
+
+
+@router.get("/available-models")
+async def get_available_models(
+    user: User = Depends(get_current_user),
+):
+    """Return available LLM models and the user's current selection."""
+    settings = get_settings()
+    user_settings = user.settings or {}
+    current_model = user_settings.get("llm_model", settings.anthropic_model)
+    return {
+        "models": settings.available_models,
+        "current": current_model,
+        "default": settings.anthropic_model,
+    }
 
 
 @router.put("/preferences")

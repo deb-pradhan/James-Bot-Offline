@@ -26,6 +26,8 @@ import {
   PanelLeftOpen,
   X,
   Bot,
+  ArrowUp,
+  Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -42,36 +44,61 @@ const DEFAULT_SUGGESTIONS = [
   "Any pending action items?",
 ];
 
-export function QueryPanel() {
+interface QueryPanelProps {
+  collapsed: boolean;
+  onCollapse: (collapsed: boolean) => void;
+  width: number;
+}
+
+export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
   const params = useParams<{ contactId?: string }>();
   const contactId = params?.contactId ?? null;
 
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  const [scopeEnabled, setScopeEnabled] = useState(true);
 
-  // Auto-collapse on mobile
+  // Scope state
+  const [scopeContactId, setScopeContactId] = useState<string | null>(null);
+  const [scopeEnabled, setScopeEnabled] = useState(true);
+  const [scopeSearchOpen, setScopeSearchOpen] = useState(false);
+  const [scopeSearchQuery, setScopeSearchQuery] = useState("");
+  const scopeSearchRef = useRef<HTMLInputElement>(null);
+
+  // Sync scope with route param when it changes
   useEffect(() => {
-    if (typeof window !== "undefined" && window.innerWidth < 1024) {
-      setCollapsed(true);
+    if (contactId) {
+      setScopeContactId(contactId);
+      setScopeEnabled(true);
     }
-  }, []);
+  }, [contactId]);
+
   const [suggestions, setSuggestions] = useState<string[]>(DEFAULT_SUGGESTIONS);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Fetch contact name when scoped
   const { data: contactData } = useQuery({
-    queryKey: ["contact-info", contactId],
-    queryFn: () => api.contacts.get(contactId!) as Promise<Contact>,
-    enabled: !!contactId,
+    queryKey: ["contact-info", scopeContactId],
+    queryFn: () => api.contacts.get(scopeContactId!) as Promise<Contact>,
+    enabled: !!scopeContactId,
     staleTime: 60_000,
   });
 
+  // Search contacts for scope selector
+  const { data: scopeSearchResults } = useQuery({
+    queryKey: ["contacts-search", scopeSearchQuery],
+    queryFn: () =>
+      api.contacts.list({ search: scopeSearchQuery || undefined, limit: 10 }) as Promise<{
+        contacts: Contact[];
+        total: number;
+      }>,
+    enabled: scopeSearchOpen,
+    staleTime: 10_000,
+  });
+
   const contactName = contactData?.display_name ?? null;
-  const effectiveContactId = contactId && scopeEnabled ? contactId : undefined;
+  const effectiveScopeId = scopeContactId && scopeEnabled ? scopeContactId : undefined;
 
   // Fetch personalized suggestions
   useEffect(() => {
@@ -96,6 +123,13 @@ export function QueryPanel() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
+  // Focus scope search when opened
+  useEffect(() => {
+    if (scopeSearchOpen) {
+      scopeSearchRef.current?.focus();
+    }
+  }, [scopeSearchOpen]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading) return;
@@ -108,7 +142,7 @@ export function QueryPanel() {
     try {
       const res = (await api.chat.query(
         question,
-        effectiveContactId,
+        effectiveScopeId,
       )) as QueryResponse;
       setMessages((prev) => [
         ...prev,
@@ -127,12 +161,25 @@ export function QueryPanel() {
     }
   };
 
+  const handleScopeSelect = (contact: Contact) => {
+    setScopeContactId(contact.id);
+    setScopeEnabled(true);
+    setScopeSearchOpen(false);
+    setScopeSearchQuery("");
+  };
+
+  const handleScopeRemove = () => {
+    setScopeContactId(null);
+    setScopeEnabled(false);
+    setScopeSearchOpen(false);
+  };
+
   // ── Collapsed state ──
   if (collapsed) {
     return (
       <div className="flex w-10 shrink-0 flex-col items-center border-r border-border-grid bg-surface-card pt-3">
         <button
-          onClick={() => setCollapsed(false)}
+          onClick={() => onCollapse(false)}
           className="text-ink-tertiary hover:text-ink-primary transition-colors"
           title="Open AI Assistant"
         >
@@ -153,10 +200,13 @@ export function QueryPanel() {
       {/* Mobile backdrop */}
       <div
         className="absolute inset-0 z-10 bg-black/40 lg:hidden"
-        onClick={() => setCollapsed(true)}
+        onClick={() => onCollapse(true)}
         aria-hidden="true"
       />
-      <div className="flex w-80 max-w-[calc(100vw-3rem)] shrink-0 flex-col overflow-hidden border-r border-border-grid bg-surface-card absolute inset-y-0 left-0 z-20 lg:relative lg:z-auto lg:w-96 lg:max-w-none">
+      <div
+        className="flex shrink-0 flex-col overflow-hidden border-r border-border-grid bg-surface-card absolute inset-y-0 left-0 z-20 max-w-[calc(100vw-3rem)] lg:relative lg:z-auto lg:max-w-none"
+        style={{ width: `${width}px` }}
+      >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border-grid px-3 py-2.5">
         <div className="flex items-center gap-2 min-w-0">
@@ -164,7 +214,7 @@ export function QueryPanel() {
           <span className="text-sm text-ink-primary truncate">AI Assistant</span>
         </div>
         <button
-          onClick={() => setCollapsed(true)}
+          onClick={() => onCollapse(true)}
           className="text-ink-tertiary hover:text-ink-primary transition-colors shrink-0"
           title="Collapse panel"
         >
@@ -172,31 +222,91 @@ export function QueryPanel() {
         </button>
       </div>
 
-      {/* Scope indicator */}
-      {contactId && (
-        <div className="flex items-center gap-2 border-b border-border-element px-3 py-1.5">
-          <span className="text-[11px] text-ink-tertiary">Scope:</span>
-          {scopeEnabled ? (
-            <Badge
-              variant="outline"
-              className="text-[10px] gap-1 cursor-pointer"
-              onClick={() => setScopeEnabled(false)}
+      {/* Scope indicator — now with search */}
+      <div className="border-b border-border-element px-3 py-1.5">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-ink-tertiary shrink-0">Scope:</span>
+          <div className="flex items-center gap-1 flex-1 min-w-0 flex-wrap">
+            {scopeContactId && scopeEnabled ? (
+              <Badge
+                variant="outline"
+                className="text-[10px] gap-1 cursor-pointer"
+                onClick={() => {
+                  setScopeEnabled(false);
+                  setScopeContactId(null);
+                }}
+              >
+                <User className="h-2.5 w-2.5" strokeWidth={1.5} />
+                {contactName ?? "Loading..."}
+                <X className="h-2.5 w-2.5 ml-0.5" strokeWidth={1.5} />
+              </Badge>
+            ) : (
+              <Badge
+                variant="secondary"
+                className="text-[10px] gap-1"
+              >
+                All Chats
+              </Badge>
+            )}
+            <button
+              onClick={() => setScopeSearchOpen(!scopeSearchOpen)}
+              className="flex items-center gap-0.5 text-[10px] text-ink-tertiary hover:text-primary transition-colors px-1"
+              title="Search and add scope"
             >
-              <User className="h-2.5 w-2.5" strokeWidth={1.5} />
-              {contactName ?? "Loading..."}
-              <X className="h-2.5 w-2.5 ml-0.5" strokeWidth={1.5} />
-            </Badge>
-          ) : (
-            <Badge
-              variant="secondary"
-              className="text-[10px] gap-1 cursor-pointer"
-              onClick={() => setScopeEnabled(true)}
-            >
-              All Chats
-            </Badge>
-          )}
+              <Plus className="h-3 w-3" strokeWidth={1.5} />
+              <span>{scopeContactId && scopeEnabled ? "Change" : "Add"}</span>
+            </button>
+          </div>
         </div>
-      )}
+
+        {/* Scope search dropdown */}
+        {scopeSearchOpen && (
+          <div className="mt-2 space-y-1">
+            <Input
+              ref={scopeSearchRef}
+              placeholder="Search contacts..."
+              value={scopeSearchQuery}
+              onChange={(e) => setScopeSearchQuery(e.target.value)}
+              className="text-xs h-7"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setScopeSearchOpen(false);
+                  setScopeSearchQuery("");
+                }
+              }}
+            />
+            <div className="max-h-40 overflow-y-auto border border-border-element bg-surface-subtle">
+              {/* "All Chats" option */}
+              <button
+                onClick={handleScopeRemove}
+                className="flex items-center gap-2 w-full px-2 py-1.5 text-left text-xs text-ink-secondary hover:bg-surface-card transition-colors"
+              >
+                <Search className="h-3 w-3 text-ink-tertiary" strokeWidth={1.5} />
+                All Chats
+              </button>
+              {(scopeSearchResults?.contacts ?? []).map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => handleScopeSelect(c)}
+                  className={cn(
+                    "flex items-center gap-2 w-full px-2 py-1.5 text-left text-xs hover:bg-surface-card transition-colors",
+                    c.id === scopeContactId ? "text-primary" : "text-ink-secondary"
+                  )}
+                >
+                  <div className="flex h-5 w-5 shrink-0 items-center justify-center bg-accent text-primary text-[9px]">
+                    {c.display_name.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="truncate">{c.display_name}</span>
+                  <span className="ml-auto text-[10px] text-ink-tertiary font-mono">{c.total_messages}</span>
+                </button>
+              ))}
+              {scopeSearchResults?.contacts?.length === 0 && scopeSearchQuery && (
+                <p className="px-2 py-2 text-[10px] text-ink-tertiary text-center">No contacts found</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Messages */}
       <ScrollArea className="flex-1 min-h-0 px-3 py-3">
@@ -209,7 +319,7 @@ export function QueryPanel() {
             <p className="text-xs text-ink-secondary">
               Ask anything about your chat history
             </p>
-            {contactId && scopeEnabled && contactName && (
+            {scopeContactId && scopeEnabled && contactName && (
               <p className="mt-1 text-[11px] text-ink-tertiary">
                 Scoped to <span className="text-ink-secondary">{contactName}</span>
               </p>
@@ -320,14 +430,14 @@ export function QueryPanel() {
         )}
       </ScrollArea>
 
-      {/* Input */}
+      {/* Input — arrow icon instead of search */}
       <form
         onSubmit={handleSubmit}
         className="flex gap-1.5 border-t border-border-grid p-2"
       >
         <Input
           placeholder={
-            effectiveContactId
+            effectiveScopeId
               ? `Ask about ${contactName ?? "this chat"}...`
               : "Ask about all chats..."
           }
@@ -345,7 +455,7 @@ export function QueryPanel() {
           {loading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
           ) : (
-            <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
+            <ArrowUp className="h-3.5 w-3.5" strokeWidth={2} />
           )}
         </Button>
       </form>

@@ -1,14 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink } from "lucide-react";
+import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink, Brain, Zap, Sparkles, Crown } from "lucide-react";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
@@ -75,6 +75,37 @@ export default function SettingsPage() {
       toast.error(message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // LLM model selection
+  const { data: modelData } = useQuery({
+    queryKey: ["available-models"],
+    queryFn: () => api.settings.availableModels(),
+  });
+
+  const modelMutation = useMutation({
+    mutationFn: (modelId: string) =>
+      api.settings.updatePreferences({ llm_model: modelId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["available-models"] });
+      toast.success("Model updated");
+    },
+    onError: () => {
+      toast.error("Failed to update model");
+    },
+  });
+
+  const tierIcon = (tier: string) => {
+    switch (tier) {
+      case "fast":
+        return <Zap className="h-4 w-4" strokeWidth={1.5} />;
+      case "balanced":
+        return <Sparkles className="h-4 w-4" strokeWidth={1.5} />;
+      case "premium":
+        return <Crown className="h-4 w-4" strokeWidth={1.5} />;
+      default:
+        return <Brain className="h-4 w-4" strokeWidth={1.5} />;
     }
   };
 
@@ -204,6 +235,87 @@ export default function SettingsPage() {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* LLM Model Selection */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Brain className="h-4 w-4 text-primary" strokeWidth={1.5} />
+                AI Model
+              </CardTitle>
+              <CardDescription>
+                Choose the model used for ghostwriting, summaries, and chat queries
+              </CardDescription>
+            </div>
+            {modelData?.current && (
+              <Badge variant="default">
+                {modelData.models.find((m) => m.id === modelData.current)?.name ?? modelData.current}
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {modelData?.models.map((model) => {
+            const isSelected = model.id === modelData.current;
+            const isDefault = model.id === modelData.default;
+            return (
+              <button
+                key={model.id}
+                onClick={() => {
+                  if (!isSelected) modelMutation.mutate(model.id);
+                }}
+                disabled={modelMutation.isPending}
+                className={`w-full text-left p-4 border transition-colors ${
+                  isSelected
+                    ? "border-primary bg-[color:var(--color-accent-subtle)]"
+                    : "border-border-element hover:border-border-grid"
+                } ${modelMutation.isPending ? "opacity-50" : ""}`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`${
+                        isSelected ? "text-primary" : "text-ink-tertiary"
+                      }`}
+                    >
+                      {tierIcon(model.tier)}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-sm ${
+                            isSelected ? "text-ink-primary" : "text-ink-secondary"
+                          }`}
+                        >
+                          {model.name}
+                        </span>
+                        {isDefault && (
+                          <span className="text-label text-ink-tertiary uppercase tracking-widest">
+                            default
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-ink-tertiary mt-0.5">
+                        {model.description}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono text-xs text-ink-tertiary tabular-nums">
+                      ${model.input_cost_per_m}/{model.output_cost_per_m}
+                    </div>
+                    <div className="text-label text-ink-tertiary uppercase tracking-widest">
+                      per 1M tok
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </CardContent>
       </Card>
 

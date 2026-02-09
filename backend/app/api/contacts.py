@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from app.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_user_llm_model
 from app.models.user import User
 from app.models.contact import Contact
 from app.models.message import Message
@@ -205,10 +205,12 @@ async def get_contact_messages(
 SUMMARY_SYSTEM = """You are a concise conversation analyst. You are summarizing a chat for the user ("You") so they can quickly get up to speed before replying.
 
 Rules:
-- 3-5 bullet points max
+- 4-6 bullet points max
+- REVERSE CHRONOLOGICAL ORDER: most recent topics first, older topics last
 - ALWAYS refer to the user as "You" (never by their name)
 - Refer to the other person by their name
-- Focus on: what's being discussed, any open questions/requests aimed at You, emotional tone, anything that needs a reply
+- Start with any ACTION ITEMS or things that need your immediate attention/reply — prefix these with ⚡
+- Then cover recent discussion topics in order of recency
 - Use present tense ("They're asking you about...", "You discussed...")
 - Keep each bullet to one line
 - No preamble, just the bullets"""
@@ -252,6 +254,7 @@ async def get_contact_summary(
         temperature=0.3,
         user_id=user.id,
         operation="chat_summary",
+        model=get_user_llm_model(user),
     )
 
     return {"summary": summary, "message_count": len(messages)}

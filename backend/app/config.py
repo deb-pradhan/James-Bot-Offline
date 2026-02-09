@@ -22,6 +22,36 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-20250514"
 
+    # Available LLM models for user selection
+    @property
+    def available_models(self) -> list[dict]:
+        return [
+            {
+                "id": "claude-3-5-haiku-20241022",
+                "name": "Claude 3.5 Haiku",
+                "description": "Fastest, lowest cost. Good for simple replies.",
+                "tier": "fast",
+                "input_cost_per_m": 0.80,
+                "output_cost_per_m": 4.00,
+            },
+            {
+                "id": "claude-sonnet-4-20250514",
+                "name": "Claude Sonnet 4",
+                "description": "Balanced speed & quality. Recommended default.",
+                "tier": "balanced",
+                "input_cost_per_m": 3.00,
+                "output_cost_per_m": 15.00,
+            },
+            {
+                "id": "claude-4-opus-20250514",
+                "name": "Claude 4 Opus",
+                "description": "Most capable. Best for nuanced ghostwriting.",
+                "tier": "premium",
+                "input_cost_per_m": 15.00,
+                "output_cost_per_m": 75.00,
+            },
+        ]
+
     # Embeddings (OpenAI primary, Voyage AI fallback)
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"

@@ -93,6 +93,7 @@ async def ingest_telegram_export(
     self_user_id_override: str | None = None,
     job_id: uuid.UUID | None = None,
     filename: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """
     Full ingestion pipeline. Returns summary stats.
@@ -339,7 +340,7 @@ async def ingest_telegram_export(
             )
 
             try:
-                style = await analyze_contact_style(db, user_id, contact, user_name)
+                style = await analyze_contact_style(db, user_id, contact, user_name, model=model)
                 contact.style_profile = style
             except Exception as e:
                 logger.warning(
