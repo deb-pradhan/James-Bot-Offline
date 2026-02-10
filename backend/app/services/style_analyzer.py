@@ -24,6 +24,7 @@ async def analyze_contact_style(
     contact: Contact,
     user_name: str,
     model: str | None = None,
+    user_settings: dict | None = None,
 ) -> str:
     """
     Analyze James's communication style with a specific contact.
@@ -72,6 +73,7 @@ async def analyze_contact_style(
         user_id=user_id,
         operation="style_analysis",
         model=model,
+        user_settings=user_settings,
     )
 
     logger.info(

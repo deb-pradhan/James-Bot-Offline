@@ -64,3 +64,13 @@ def get_user_llm_model(user: User) -> str | None:
         if model in valid_ids:
             return model
     return None
+
+
+def get_user_settings(user: User) -> dict:
+    """Get user settings with defaults applied."""
+    defaults = {
+        "ai_enabled": True,
+        "llm_model": None,
+        "anthropic_api_key": None,
+    }
+    return {**defaults, **(user.settings or {})}

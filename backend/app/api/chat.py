@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from app.database import get_db
-from app.api.deps import get_current_user, get_user_llm_model
+from app.api.deps import get_current_user, get_user_llm_model, get_user_settings
 from app.models.user import User
 from app.models.contact import Contact
 from app.models.document import Document
@@ -156,6 +156,7 @@ async def query_history(
         user_name=user.name,
         contact_id=contact_id,
         model=get_user_llm_model(user),
+        user_settings=get_user_settings(user),
     )
 
     return QueryResponse(

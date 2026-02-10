@@ -10,7 +10,7 @@ from sqlalchemy import select, desc, func
 import redis.asyncio as aioredis
 
 from app.database import get_db
-from app.api.deps import get_current_user, get_redis, get_user_llm_model
+from app.api.deps import get_current_user, get_redis, get_user_llm_model, get_user_settings
 from app.models.user import User
 from app.models.contact import Contact
 from app.models.suggestion import ResponseSuggestion
@@ -97,6 +97,7 @@ async def generate_suggestion(
         user_name=user.name,
         user_instruction=req.user_instruction,
         model=get_user_llm_model(user),
+        user_settings=get_user_settings(user),
     )
 
     # Notify via WebSocket
@@ -173,6 +174,7 @@ async def generate_all_suggestions(
                 contact_id=contact.id,
                 user_name=user.name,
                 model=get_user_llm_model(user),
+                user_settings=get_user_settings(user),
             )
             suggestions.append(
                 SuggestionResponse(

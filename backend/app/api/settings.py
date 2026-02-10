@@ -194,3 +194,46 @@ async def update_preferences(
     await db.commit()
     logger.info(f"[SETTINGS] Updated preferences for {user.email}")
     return {"status": "updated", "settings": user.settings}
+
+
+class ValidateApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@router.post("/validate-api-key")
+async def validate_anthropic_api_key(
+    req: ValidateApiKeyRequest,
+    user: User = Depends(get_current_user),
+):
+    """Validate a custom Anthropic API key by making a minimal API call."""
+    from anthropic import AsyncAnthropic, APIError
+
+    try:
+        client = AsyncAnthropic(api_key=req.api_key)
+        # Make a minimal call to validate the key
+        await client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+        return {"valid": True, "message": "API key is valid"}
+    except APIError as e:
+        logger.warning(f"[SETTINGS] Invalid API key for {user.email}: {e}")
+        return {"valid": False, "message": f"Invalid API key: {e.message}"}
+    except Exception as e:
+        logger.error(f"[SETTINGS] API key validation error: {e}")
+        return {"valid": False, "message": f"Validation failed: {str(e)}"}
+
+
+@router.get("/ai-status")
+async def get_ai_status(
+    user: User = Depends(get_current_user),
+):
+    """Get AI enabled status and custom API key info."""
+    user_settings = user.settings or {}
+    has_custom_key = bool(user_settings.get("anthropic_api_key"))
+    return {
+        "ai_enabled": user_settings.get("ai_enabled", True),
+        "has_custom_api_key": has_custom_key,
+        "using_custom_key": has_custom_key,
+    }

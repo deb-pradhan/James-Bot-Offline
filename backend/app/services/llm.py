@@ -15,15 +15,36 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 _client: AsyncAnthropic | None = None
+_custom_clients: dict[str, AsyncAnthropic] = {}
 
 
-def get_client() -> AsyncAnthropic:
+class AIDisabledError(Exception):
+    """Raised when AI is disabled by user."""
+    pass
+
+
+def get_client(custom_api_key: str | None = None) -> AsyncAnthropic:
+    """Get Anthropic client, optionally with user's custom API key."""
     global _client
+
+    # If custom key provided, return/cache a dedicated client
+    if custom_api_key:
+        if custom_api_key not in _custom_clients:
+            _custom_clients[custom_api_key] = AsyncAnthropic(api_key=custom_api_key)
+        return _custom_clients[custom_api_key]
+
+    # Default client using env key
     if _client is None:
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured")
         _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _client
+
+
+def check_ai_enabled(user_settings: dict | None) -> None:
+    """Raise AIDisabledError if user has disabled AI."""
+    if user_settings and user_settings.get("ai_enabled") is False:
+        raise AIDisabledError("AI features are disabled. Enable them in Settings.")
 
 
 async def generate_response(
@@ -35,6 +56,7 @@ async def generate_response(
     user_id: uuid.UUID | None = None,
     operation: str | None = None,
     model: str | None = None,
+    user_settings: dict | None = None,
 ) -> str:
     """Generic Claude call with system + user prompt.
 
@@ -42,8 +64,14 @@ async def generate_response(
     to the api_usage table.
 
     model: optional override — falls back to config default.
+    user_settings: user's preferences (for ai_enabled check and custom API key).
     """
-    client = get_client()
+    # Check if AI is enabled
+    check_ai_enabled(user_settings)
+
+    # Use custom API key if user provided one
+    custom_key = user_settings.get("anthropic_api_key") if user_settings else None
+    client = get_client(custom_key)
     active_model = model or settings.anthropic_model
 
     logger.info(

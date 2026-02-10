@@ -7,8 +7,9 @@ import json
 import logging
 import sys
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
 from sqlalchemy import select
 
@@ -155,6 +156,18 @@ app.add_middleware(
 
 # Routes
 app.include_router(api_router)
+
+# Exception handler for AI disabled
+from app.services.llm import AIDisabledError
+
+
+@app.exception_handler(AIDisabledError)
+async def ai_disabled_exception_handler(request: Request, exc: AIDisabledError):
+    """Return a clear error when AI features are disabled."""
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc)},
+    )
 
 
 @app.get("/health")

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from app.database import get_db
-from app.api.deps import get_current_user, get_user_llm_model
+from app.api.deps import get_current_user, get_user_llm_model, get_user_settings
 from app.models.user import User
 from app.models.contact import Contact
 from app.models.message import Message
@@ -255,6 +255,7 @@ async def get_contact_summary(
         user_id=user.id,
         operation="chat_summary",
         model=get_user_llm_model(user),
+        user_settings=get_user_settings(user),
     )
 
     return {"summary": summary, "message_count": len(messages)}

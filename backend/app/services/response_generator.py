@@ -32,6 +32,7 @@ async def generate_reply(
     user_name: str,
     user_instruction: str | None = None,
     model: str | None = None,
+    user_settings: dict | None = None,
 ) -> ResponseSuggestion:
     """
     Generate a ghostwritten reply for a specific contact.
@@ -115,6 +116,7 @@ async def generate_reply(
         user_id=user_id,
         operation="ghostwrite",
         model=model,
+        user_settings=user_settings,
     )
 
     # Store suggestion
@@ -143,6 +145,7 @@ async def query_chat_history(
     user_name: str,
     contact_id: uuid.UUID | None = None,
     model: str | None = None,
+    user_settings: dict | None = None,
 ) -> dict:
     """
     Answer a natural language question about chat history using RAG.
@@ -175,6 +178,7 @@ async def query_chat_history(
         user_id=user_id,
         operation="query",
         model=model,
+        user_settings=user_settings,
     )
 
     # Build source citations

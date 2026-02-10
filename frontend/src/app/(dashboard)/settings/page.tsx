@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink, Brain, Zap, Sparkles, Crown } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink, Brain, Zap, Sparkles, Crown, Power, Key, Eye, EyeOff, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
@@ -23,6 +24,11 @@ export default function SettingsPage() {
   const [code, setCode] = useState("");
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // AI settings state
+  const [customApiKey, setCustomApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [validatingKey, setValidatingKey] = useState(false);
 
   // Fetch current status
   const { data: tgStatus } = useQuery({
@@ -78,6 +84,12 @@ export default function SettingsPage() {
     }
   };
 
+  // AI status
+  const { data: aiStatus } = useQuery({
+    queryKey: ["ai-status"],
+    queryFn: () => api.settings.getAiStatus(),
+  });
+
   // LLM model selection
   const { data: modelData } = useQuery({
     queryKey: ["available-models"],
@@ -95,6 +107,56 @@ export default function SettingsPage() {
       toast.error("Failed to update model");
     },
   });
+
+  // AI toggle mutation
+  const aiToggleMutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.settings.updatePreferences({ ai_enabled: enabled }),
+    onSuccess: (_, enabled) => {
+      queryClient.invalidateQueries({ queryKey: ["ai-status"] });
+      toast.success(enabled ? "AI features enabled" : "AI features disabled");
+    },
+    onError: () => {
+      toast.error("Failed to update AI status");
+    },
+  });
+
+  // Custom API key mutation
+  const apiKeyMutation = useMutation({
+    mutationFn: async (apiKey: string | null) => {
+      if (apiKey) {
+        // Validate first
+        const result = await api.settings.validateApiKey(apiKey);
+        if (!result.valid) {
+          throw new Error(result.message);
+        }
+      }
+      // Save to preferences
+      return api.settings.updatePreferences({ anthropic_api_key: apiKey });
+    },
+    onSuccess: (_, apiKey) => {
+      queryClient.invalidateQueries({ queryKey: ["ai-status"] });
+      setCustomApiKey("");
+      toast.success(apiKey ? "Custom API key saved" : "Custom API key removed");
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || "Failed to save API key");
+    },
+  });
+
+  const handleSaveApiKey = async () => {
+    if (!customApiKey.trim()) return;
+    setValidatingKey(true);
+    try {
+      await apiKeyMutation.mutateAsync(customApiKey.trim());
+    } finally {
+      setValidatingKey(false);
+    }
+  };
+
+  const handleRemoveApiKey = () => {
+    apiKeyMutation.mutate(null);
+  };
 
   const tierIcon = (tier: string) => {
     switch (tier) {
@@ -238,6 +300,152 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* AI Kill Switch */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Power className="h-4 w-4 text-signal-error" strokeWidth={1.5} />
+                AI Kill Switch
+              </CardTitle>
+              <CardDescription>
+                Instantly disable all AI features to stop API costs
+              </CardDescription>
+            </div>
+            <Badge variant={aiStatus?.ai_enabled ? "default" : "destructive"}>
+              {aiStatus?.ai_enabled ? "Active" : "Disabled"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between p-4 border border-border-element">
+            <div>
+              <p className="text-sm text-ink-primary">Enable AI Features</p>
+              <p className="text-xs text-ink-tertiary mt-0.5">
+                {aiStatus?.ai_enabled
+                  ? "AI ghostwriting, summaries, and queries are active"
+                  : "All AI features are disabled — no API calls will be made"}
+              </p>
+            </div>
+            <Switch
+              checked={aiStatus?.ai_enabled ?? true}
+              onCheckedChange={(checked) => aiToggleMutation.mutate(checked)}
+              disabled={aiToggleMutation.isPending}
+            />
+          </div>
+          {!aiStatus?.ai_enabled && (
+            <div className="mt-3 p-3 border border-signal-warning/20 bg-signal-warning/5">
+              <p className="text-xs text-signal-warning">
+                AI is currently disabled. Enable it above to use ghostwriting and other AI features.
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Custom API Key */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Key className="h-4 w-4 text-primary" strokeWidth={1.5} />
+                Custom Claude API Key
+              </CardTitle>
+              <CardDescription>
+                Use your own Anthropic API key for AI features
+              </CardDescription>
+            </div>
+            {aiStatus?.has_custom_api_key && (
+              <Badge variant="default">Custom Key Active</Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {aiStatus?.has_custom_api_key ? (
+            <div className="flex items-center justify-between p-4 border border-signal-success/20 bg-signal-success/5">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 className="h-5 w-5 text-signal-success" strokeWidth={1.5} />
+                <div>
+                  <p className="text-sm text-signal-success">Custom API key configured</p>
+                  <p className="text-xs text-signal-success/70">
+                    All AI calls use your personal Anthropic API key
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRemoveApiKey}
+                disabled={apiKeyMutation.isPending}
+                className="text-signal-error hover:text-signal-error"
+              >
+                <Trash2 className="h-4 w-4 mr-1" strokeWidth={1.5} />
+                Remove
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-2">
+                <p className="text-sm text-ink-secondary">
+                  Enter your Anthropic API key to use your own account for AI features.
+                  Get your key from{" "}
+                  <a
+                    href="https://console.anthropic.com/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:text-[#4B8AFF] transition-colors"
+                  >
+                    console.anthropic.com
+                    <ExternalLink className="ml-1 inline h-3 w-3" strokeWidth={1.5} />
+                  </a>
+                </p>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input
+                      type={showApiKey ? "text" : "password"}
+                      placeholder="sk-ant-api03-..."
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      disabled={validatingKey}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-tertiary hover:text-ink-secondary"
+                    >
+                      {showApiKey ? (
+                        <EyeOff className="h-4 w-4" strokeWidth={1.5} />
+                      ) : (
+                        <Eye className="h-4 w-4" strokeWidth={1.5} />
+                      )}
+                    </button>
+                  </div>
+                  <Button
+                    onClick={handleSaveApiKey}
+                    disabled={!customApiKey.trim() || validatingKey}
+                  >
+                    {validatingKey ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
+                    ) : null}
+                    Save Key
+                  </Button>
+                </div>
+              </div>
+              <div className="p-3 border border-border-element bg-surface-inset text-xs text-ink-tertiary">
+                <p className="font-medium text-ink-secondary mb-1">Why use your own key?</p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  <li>Direct billing to your Anthropic account</li>
+                  <li>Access to your own rate limits</li>
+                  <li>Full control over API usage</li>
+                </ul>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
       {/* LLM Model Selection */}
       <Card>
         <CardHeader>
@@ -268,12 +476,12 @@ export default function SettingsPage() {
                 onClick={() => {
                   if (!isSelected) modelMutation.mutate(model.id);
                 }}
-                disabled={modelMutation.isPending}
+                disabled={modelMutation.isPending || !aiStatus?.ai_enabled}
                 className={`w-full text-left p-4 border transition-colors ${
                   isSelected
                     ? "border-primary bg-[color:var(--color-accent-subtle)]"
                     : "border-border-element hover:border-border-grid"
-                } ${modelMutation.isPending ? "opacity-50" : ""}`}
+                } ${modelMutation.isPending || !aiStatus?.ai_enabled ? "opacity-50" : ""}`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
