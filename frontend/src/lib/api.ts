@@ -180,6 +180,10 @@ export const api = {
       request<{ status: string; message: string }>("/api/ingest/stop-analysis", {
         method: "POST",
       }),
+    stop: () =>
+      request<{ status: string; message: string }>("/api/ingest/stop", {
+        method: "POST",
+      }),
     history: (params?: { limit?: number; offset?: number }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));
@@ -262,5 +266,16 @@ export const api = {
         current: string;
         default: string;
       }>("/api/settings/available-models"),
+    validateApiKey: (apiKey: string) =>
+      request<{ valid: boolean; message: string }>("/api/settings/validate-api-key", {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey }),
+      }),
+    getAiStatus: () =>
+      request<{
+        ai_enabled: boolean;
+        has_custom_api_key: boolean;
+        using_custom_key: boolean;
+      }>("/api/settings/ai-status"),
   },
 };

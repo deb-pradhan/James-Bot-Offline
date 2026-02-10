@@ -27,7 +27,7 @@ from app.schemas.ingest import (
 from app.services.ingestion import ingest_telegram_export
 from app.services.document_parser import parse_document, chunk_document_text
 from app.services.embedding import embed_texts
-from app.api.deps import get_user_llm_model
+from app.api.deps import get_user_llm_model, get_user_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingest"])
@@ -86,6 +86,7 @@ async def upload_telegram_export(
     job_id = job.id
     upload_filename = file.filename
     user_model = get_user_llm_model(user)
+    user_prefs = get_user_settings(user)
 
     # Run ingestion in background (using asyncio.create_task for now)
     import asyncio
@@ -104,6 +105,7 @@ async def upload_telegram_export(
                     job_id=job_id,
                     filename=upload_filename,
                     model=user_model,
+                    user_settings=user_prefs,
                 )
                 await bg_db.commit()
                 logger.info(f"[INGEST] Job {job_id} completed: {result}")
@@ -201,6 +203,21 @@ async def stop_style_analysis(
     await redis_client.set(cancel_key, "1", ex=300)  # auto-expire after 5min
     logger.info(f"[INGEST] Style analysis stop requested by {user.email}")
     return {"status": "ok", "message": "Stop signal sent. Analysis will halt after the current contact."}
+
+
+@router.post("/stop")
+async def stop_ingestion(
+    redis_client: aioredis.Redis = Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """Signal the running ingestion job to stop as soon as possible."""
+    cancel_key = f"ingest:cancel_job:{str(user.id)}"
+    await redis_client.set(cancel_key, "1", ex=600)  # auto-expire after 10min
+    logger.info(f"[INGEST] Full ingestion stop requested by {user.email}")
+    return {
+        "status": "ok",
+        "message": "Stop signal sent. Ingestion will stop shortly.",
+    }
 
 
 @router.get("/history", response_model=IngestionHistoryResponse)

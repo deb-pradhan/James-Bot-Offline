@@ -62,6 +62,9 @@ export default function IngestPage() {
   const { lastEvent } = useWebSocket();
   const checkedRef = useRef(false);
   const lastProcessedEventRef = useRef<string | null>(null);
+  const noActiveJobToastRef = useRef(false);
+  const isStopping = status === "stopping";
+  const isProcessingOrStopping = status === "processing" || status === "stopping";
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -130,11 +133,11 @@ export default function IngestPage() {
       const isStopped = message.toLowerCase().includes("stopped by user");
 
       if (isStopped) {
-        // Analysis was stopped — we'll get "complete" step momentarily
+        // Ingestion stop was requested — we'll get "complete" step momentarily
         setStatus("stopping");
         setCurrentStep({
           step,
-          label: "Wrapping up — style analysis stopped",
+          label: "Wrapping up — stopping ingestion",
           progress: data?.progress ?? undefined,
           total: data?.total ?? undefined,
         });
@@ -162,6 +165,71 @@ export default function IngestPage() {
       setCurrentStep(null);
     }
   }, [lastEvent, status, fetchHistory]);
+
+  // Poll active ingestion status as a fallback when WS events are missed
+  useEffect(() => {
+    if (!isProcessingOrStopping) {
+      noActiveJobToastRef.current = false;
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncActiveJob = async () => {
+      try {
+        const job = await api.ingest.status();
+        if (cancelled) return;
+
+        if (!job) {
+          setStatus("idle");
+          setCurrentStep(null);
+          if (!noActiveJobToastRef.current) {
+            toast.warning("No active ingestion job found. Processing view reset.");
+            noActiveJobToastRef.current = true;
+          }
+          return;
+        }
+
+        if (job.status === "processing") {
+          noActiveJobToastRef.current = false;
+          setStatus((prev) => (prev === "stopping" ? prev : "processing"));
+          setCurrentStep({
+            step: job.step ?? "parsing",
+            label: STEP_LABELS[job.step ?? "parsing"] ?? job.message ?? "Processing...",
+            progress: job.progress ?? undefined,
+            total: job.total ?? undefined,
+          });
+          return;
+        }
+
+        if (job.status === "complete") {
+          noActiveJobToastRef.current = false;
+          setStatus("complete");
+          setResult(job.result ?? null);
+          setCurrentStep(null);
+          fetchHistory();
+          return;
+        }
+
+        if (job.status === "failed") {
+          noActiveJobToastRef.current = false;
+          setStatus("error");
+          setErrorMessage(job.message ?? "Ingestion failed");
+          setCurrentStep(null);
+        }
+      } catch {
+        // Keep the current UI state and retry on next interval tick
+      }
+    };
+
+    void syncActiveJob();
+    const interval = setInterval(syncActiveJob, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isProcessingOrStopping, fetchHistory]);
 
   const handleFileUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -194,22 +262,22 @@ export default function IngestPage() {
     []
   );
 
-  const handleStopAnalysis = useCallback(async () => {
+  const handleStopProcessing = useCallback(async () => {
     try {
-      await api.ingest.stopAnalysis();
+      await api.ingest.stop();
       setStatus("stopping");
-      toast.success("Stopping — will halt after the current contact finishes.");
+      toast.success("Stopping ingestion — this can take a few seconds.");
     } catch {
-      toast.error("Failed to stop analysis");
+      toast.error("Failed to stop ingestion");
     }
   }, []);
 
-  const isAnalyzing = currentStep?.step === "analyzing";
-  const isStopping = status === "stopping";
-  const isProcessingOrStopping = status === "processing" || status === "stopping";
-
   const progressPercent =
-    currentStep?.progress && currentStep?.total
+    currentStep?.progress !== undefined &&
+    currentStep?.progress !== null &&
+    currentStep?.total !== undefined &&
+    currentStep?.total !== null &&
+    currentStep.total > 0
       ? Math.round((currentStep.progress / currentStep.total) * 100)
       : undefined;
 
@@ -291,16 +359,16 @@ export default function IngestPage() {
                 )}
               </div>
 
-              {/* Stop Analysis Button — only when actively analyzing (not already stopping) */}
-              {isAnalyzing && !isStopping && (
+              {/* Stop Processing Button — available for all ingestion steps */}
+              {!isStopping && (
                 <div className="flex justify-center">
                   <Button
                     variant="destructive"
                     size="sm"
-                    onClick={handleStopAnalysis}
+                    onClick={handleStopProcessing}
                   >
                     <Square className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
-                    Stop Style Analysis
+                    Stop Processing
                   </Button>
                 </div>
               )}

@@ -42,6 +42,10 @@ class ChunkData:
     count: int
 
 
+class IngestionCancelled(Exception):
+    """Raised when user requested a full ingestion stop."""
+
+
 async def publish_status(
     redis_client: aioredis.Redis,
     user_id: str,
@@ -94,6 +98,7 @@ async def ingest_telegram_export(
     job_id: uuid.UUID | None = None,
     filename: str | None = None,
     model: str | None = None,
+    user_settings: dict | None = None,
 ) -> dict:
     """
     Full ingestion pipeline. Returns summary stats.
@@ -101,12 +106,31 @@ async def ingest_telegram_export(
     This runs as a background task — publishes progress to Redis.
     """
     user_id_str = str(user_id)
+    cancel_job_key = f"ingest:cancel_job:{user_id_str}"
 
     async def _status(step: str, message: str, progress: int | None = None, total: int | None = None):
         await publish_status(
             redis_client, user_id_str, step, message,
             progress=progress, total=total, db=db, job_id=job_id,
         )
+
+    async def _raise_if_cancelled(
+        step: str,
+        progress: int | None = None,
+        total: int | None = None,
+    ):
+        if await redis_client.exists(cancel_job_key):
+            await redis_client.delete(cancel_job_key)
+            await _status(
+                step,
+                "Ingestion stopped by user.",
+                progress=progress,
+                total=total,
+            )
+            raise IngestionCancelled()
+
+    # Clear any stale stop flag from previous ingestion runs
+    await redis_client.delete(cancel_job_key)
 
     # ── Step 1: Parse JSON ──
     await _status("parsing", "Parsing Telegram export...")
@@ -151,203 +175,225 @@ async def ingest_telegram_export(
     total_messages = 0
     total_skipped = 0
     contacts_created = []
-
-    for i, chat in enumerate(parsed_chats):
-        await _status(
-            "importing",
-            f"Importing chat {i + 1}/{total_chats}: {chat.chat_name}",
-            progress=i + 1,
-            total=total_chats,
-        )
-
-        # Upsert contact
-        contact = await get_or_create_contact(db, user_id, chat)
-        contacts_created.append(contact)
-
-        # Fetch existing telegram_msg_ids to skip duplicates
-        existing_stmt = select(Message.telegram_msg_id).where(
-            Message.contact_id == contact.id,
-            Message.telegram_msg_id.isnot(None),
-        )
-        existing_result = await db.execute(existing_stmt)
-        existing_msg_ids = set(existing_result.scalars().all())
-
-        # Insert only new messages
-        msg_count = 0
-        for msg in chat.messages:
-            if msg.telegram_msg_id in existing_msg_ids:
-                continue
-            sender_type = "self" if msg.sender_id == self_id else "other"
-            db_msg = Message(
-                contact_id=contact.id,
-                telegram_msg_id=msg.telegram_msg_id,
-                sender_type=sender_type,
-                sender_name=msg.sender_name,
-                content=msg.text,
-                sent_at=msg.sent_at,
-                is_read=True,
-                is_responded=True,  # Historical msgs are already responded to
-            )
-            db.add(db_msg)
-            msg_count += 1
-
-        skipped = len(chat.messages) - msg_count
-        total_skipped += skipped
-        if skipped > 0:
-            logger.info(
-                f"[INGEST] {chat.chat_name}: {msg_count} new, {skipped} skipped (already exist)"
-            )
-        if msg_count > 0:
-            contact.total_messages = (contact.total_messages or 0) + msg_count
-        if chat.messages:
-            contact.last_message_at = max(m.sent_at for m in chat.messages)
-        total_messages += msg_count
-
-        # Flush every 10 chats to avoid memory bloat
-        if (i + 1) % 10 == 0:
-            await db.flush()
-
-    await db.commit()
-    logger.info(
-        f"[INGEST] Imported {total_messages} messages across {total_chats} chats "
-        f"({total_skipped} duplicates skipped)"
-    )
-
-    # ── Step 3: Chunk conversations ──
-    await _status("chunking", "Chunking conversations...")
-
     total_chunks = 0
-    for i, contact in enumerate(contacts_created):
-        await _status(
-            "chunking",
-            f"Chunking contact {i + 1}/{len(contacts_created)}: {contact.display_name}",
-            progress=i + 1,
-            total=len(contacts_created),
-        )
+    cancelled = False
 
-        # Delete old chunks for this contact (they'll be rebuilt from all messages)
-        await db.execute(
-            delete(ConversationChunk).where(
-                ConversationChunk.contact_id == contact.id
+    try:
+        for i, chat in enumerate(parsed_chats):
+            await _raise_if_cancelled("importing", progress=i, total=total_chats)
+            await _status(
+                "importing",
+                f"Importing chat {i + 1}/{total_chats}: {chat.chat_name}",
+                progress=i + 1,
+                total=total_chats,
             )
-        )
 
-        # Fetch all messages for this contact, ordered by time
-        stmt = (
-            select(Message)
-            .where(Message.contact_id == contact.id)
-            .order_by(Message.sent_at)
-        )
-        result = await db.execute(stmt)
-        messages = result.scalars().all()
+            # Upsert contact
+            contact = await get_or_create_contact(db, user_id, chat)
+            contacts_created.append(contact)
 
-        chunks = create_conversation_chunks(messages)
-        for chunk in chunks:
-            db.add(
-                ConversationChunk(
+            # Fetch existing telegram_msg_ids to skip duplicates
+            existing_stmt = select(Message.telegram_msg_id).where(
+                Message.contact_id == contact.id,
+                Message.telegram_msg_id.isnot(None),
+            )
+            existing_result = await db.execute(existing_stmt)
+            existing_msg_ids = set(existing_result.scalars().all())
+
+            # Insert only new messages
+            msg_count = 0
+            for msg in chat.messages:
+                if msg.telegram_msg_id in existing_msg_ids:
+                    continue
+                sender_type = "self" if msg.sender_id == self_id else "other"
+                db_msg = Message(
                     contact_id=contact.id,
-                    chunk_text=chunk.text,
-                    session_start=chunk.start,
-                    session_end=chunk.end,
-                    message_count=chunk.count,
+                    telegram_msg_id=msg.telegram_msg_id,
+                    sender_type=sender_type,
+                    sender_name=msg.sender_name,
+                    content=msg.text,
+                    sent_at=msg.sent_at,
+                    is_read=True,
+                    is_responded=True,  # Historical msgs are already responded to
                 )
-            )
-            total_chunks += 1
+                db.add(db_msg)
+                msg_count += 1
 
-    await db.commit()
-    logger.info(f"[INGEST] Created {total_chunks} conversation chunks")
+            skipped = len(chat.messages) - msg_count
+            total_skipped += skipped
+            if skipped > 0:
+                logger.info(
+                    f"[INGEST] {chat.chat_name}: {msg_count} new, {skipped} skipped (already exist)"
+                )
+            if msg_count > 0:
+                contact.total_messages = (contact.total_messages or 0) + msg_count
+            if chat.messages:
+                contact.last_message_at = max(m.sent_at for m in chat.messages)
+            total_messages += msg_count
 
-    # ── Step 4: Embed chunks ──
-    await _status("embedding", "Generating embeddings...")
-
-    # Fetch all unembedded chunks for this user
-    stmt = (
-        select(ConversationChunk)
-        .join(Contact, ConversationChunk.contact_id == Contact.id)
-        .where(Contact.user_id == user_id)
-        .where(ConversationChunk.embedding.is_(None))
-    )
-    result = await db.execute(stmt)
-    unembedded = result.scalars().all()
-
-    batch_size = 16  # Small batches to stay within free-tier rate limits
-    for i in range(0, len(unembedded), batch_size):
-        batch = unembedded[i : i + batch_size]
-        await _status(
-            "embedding",
-            f"Embedding chunks {min(i + batch_size, len(unembedded))}/{len(unembedded)}",
-            progress=min(i + batch_size, len(unembedded)),
-            total=len(unembedded),
-        )
-
-        texts = [c.chunk_text for c in batch]
-        embeddings = await embed_texts(
-            texts, input_type="document",
-            user_id=user_id, operation="embedding_ingest",
-        )
-
-        for chunk, emb in zip(batch, embeddings):
-            chunk.embedding = emb
+            # Flush every 10 chats to avoid memory bloat
+            if (i + 1) % 10 == 0:
+                await db.flush()
 
         await db.commit()
-
-    logger.info(f"[INGEST] Embedded {len(unembedded)} chunks")
-
-    # ── Step 5: Style analysis (DMs only) ──
-    dm_contacts = [c for c in contacts_created if c.chat_type == "personal_chat"]
-    skipped_count = len(contacts_created) - len(dm_contacts)
-
-    if skipped_count > 0:
         logger.info(
-            f"[INGEST] Skipping style analysis for {skipped_count} non-DM contacts "
-            f"(groups/channels)"
+            f"[INGEST] Imported {total_messages} messages across {total_chats} chats "
+            f"({total_skipped} duplicates skipped)"
         )
 
-    if not dm_contacts:
-        await _status(
-            "analyzing",
-            "No individual DMs to analyze — skipping style analysis.",
-        )
-    else:
-        cancel_key = f"ingest:cancel_analysis:{user_id_str}"
-        # Clear any stale cancel flag from a previous run
-        await redis_client.delete(cancel_key)
+        # ── Step 3: Chunk conversations ──
+        await _status("chunking", "Chunking conversations...")
 
-        await _status(
-            "analyzing",
-            f"Analyzing communication style for {len(dm_contacts)} DM contacts "
-            f"(skipped {skipped_count} groups/channels)...",
-        )
+        for i, contact in enumerate(contacts_created):
+            await _raise_if_cancelled(
+                "chunking", progress=i, total=len(contacts_created)
+            )
+            await _status(
+                "chunking",
+                f"Chunking contact {i + 1}/{len(contacts_created)}: {contact.display_name}",
+                progress=i + 1,
+                total=len(contacts_created),
+            )
 
-        for i, contact in enumerate(dm_contacts):
-            # Check for cancellation
-            if await redis_client.exists(cancel_key):
-                logger.info(f"[INGEST] Style analysis cancelled by user at {i}/{len(dm_contacts)}")
-                await _status(
-                    "analyzing",
-                    f"Style analysis stopped by user. Analyzed {i}/{len(dm_contacts)} contacts.",
-                    progress=i,
-                    total=len(dm_contacts),
+            # Delete old chunks for this contact (they'll be rebuilt from all messages)
+            await db.execute(
+                delete(ConversationChunk).where(
+                    ConversationChunk.contact_id == contact.id
                 )
-                await redis_client.delete(cancel_key)
-                break
+            )
+
+            # Fetch all messages for this contact, ordered by time
+            stmt = (
+                select(Message)
+                .where(Message.contact_id == contact.id)
+                .order_by(Message.sent_at)
+            )
+            result = await db.execute(stmt)
+            messages = result.scalars().all()
+
+            chunks = create_conversation_chunks(messages)
+            for chunk in chunks:
+                db.add(
+                    ConversationChunk(
+                        contact_id=contact.id,
+                        chunk_text=chunk.text,
+                        session_start=chunk.start,
+                        session_end=chunk.end,
+                        message_count=chunk.count,
+                    )
+                )
+                total_chunks += 1
+
+        await db.commit()
+        logger.info(f"[INGEST] Created {total_chunks} conversation chunks")
+
+        # ── Step 4: Embed chunks ──
+        await _status("embedding", "Generating embeddings...")
+
+        # Fetch all unembedded chunks for this user
+        stmt = (
+            select(ConversationChunk)
+            .join(Contact, ConversationChunk.contact_id == Contact.id)
+            .where(Contact.user_id == user_id)
+            .where(ConversationChunk.embedding.is_(None))
+        )
+        result = await db.execute(stmt)
+        unembedded = result.scalars().all()
+
+        batch_size = 16  # Small batches to stay within free-tier rate limits
+        for i in range(0, len(unembedded), batch_size):
+            await _raise_if_cancelled(
+                "embedding",
+                progress=min(i, len(unembedded)),
+                total=len(unembedded),
+            )
+            batch = unembedded[i : i + batch_size]
+            await _status(
+                "embedding",
+                f"Embedding chunks {min(i + batch_size, len(unembedded))}/{len(unembedded)}",
+                progress=min(i + batch_size, len(unembedded)),
+                total=len(unembedded),
+            )
+
+            texts = [c.chunk_text for c in batch]
+            embeddings = await embed_texts(
+                texts, input_type="document",
+                user_id=user_id, operation="embedding_ingest",
+            )
+
+            for chunk, emb in zip(batch, embeddings):
+                chunk.embedding = emb
+
+            await db.commit()
+
+        logger.info(f"[INGEST] Embedded {len(unembedded)} chunks")
+
+        # ── Step 5: Style analysis (DMs only) ──
+        dm_contacts = [c for c in contacts_created if c.chat_type == "personal_chat"]
+        skipped_count = len(contacts_created) - len(dm_contacts)
+
+        if skipped_count > 0:
+            logger.info(
+                f"[INGEST] Skipping style analysis for {skipped_count} non-DM contacts "
+                f"(groups/channels)"
+            )
+
+        if not dm_contacts:
+            await _status(
+                "analyzing",
+                "No individual DMs to analyze — skipping style analysis.",
+            )
+        else:
+            cancel_key = f"ingest:cancel_analysis:{user_id_str}"
+            # Clear any stale cancel flag from a previous run
+            await redis_client.delete(cancel_key)
 
             await _status(
                 "analyzing",
-                f"Analyzing style for {contact.display_name} ({i + 1}/{len(dm_contacts)})",
-                progress=i + 1,
-                total=len(dm_contacts),
+                f"Analyzing communication style for {len(dm_contacts)} DM contacts "
+                f"(skipped {skipped_count} groups/channels)...",
             )
 
-            try:
-                style = await analyze_contact_style(db, user_id, contact, user_name, model=model)
-                contact.style_profile = style
-            except Exception as e:
-                logger.warning(
-                    f"[INGEST] Style analysis failed for {contact.display_name}: {e}"
+            for i, contact in enumerate(dm_contacts):
+                await _raise_if_cancelled("analyzing", progress=i, total=len(dm_contacts))
+                # Check for cancellation
+                if await redis_client.exists(cancel_key):
+                    logger.info(f"[INGEST] Style analysis cancelled by user at {i}/{len(dm_contacts)}")
+                    await _status(
+                        "analyzing",
+                        f"Style analysis stopped by user. Analyzed {i}/{len(dm_contacts)} contacts.",
+                        progress=i,
+                        total=len(dm_contacts),
+                    )
+                    await redis_client.delete(cancel_key)
+                    break
+
+                await _status(
+                    "analyzing",
+                    f"Analyzing style for {contact.display_name} ({i + 1}/{len(dm_contacts)})",
+                    progress=i + 1,
+                    total=len(dm_contacts),
                 )
 
-    await db.commit()
+                try:
+                    style = await analyze_contact_style(
+                        db,
+                        user_id,
+                        contact,
+                        user_name,
+                        model=model,
+                        user_settings=user_settings,
+                    )
+                    contact.style_profile = style
+                except Exception as e:
+                    logger.warning(
+                        f"[INGEST] Style analysis failed for {contact.display_name}: {e}"
+                    )
+
+        await db.commit()
+    except IngestionCancelled:
+        cancelled = True
+        await db.commit()
 
     # ── Done ──
     summary = {
@@ -358,11 +404,20 @@ async def ingest_telegram_export(
         "chunks": total_chunks,
     }
 
-    await _status(
-        "complete",
-        f"Ingestion complete! {total_chats} chats, {total_messages} new messages "
-        f"({total_skipped} duplicates skipped), {total_chunks} chunks indexed.",
-    )
+    if cancelled:
+        logger.info("[INGEST] Ingestion cancelled by user")
+        summary["stopped"] = 1
+        await _status(
+            "complete",
+            f"Ingestion stopped by user. Imported {total_messages} messages "
+            f"({total_skipped} duplicates skipped), indexed {total_chunks} chunks.",
+        )
+    else:
+        await _status(
+            "complete",
+            f"Ingestion complete! {total_chats} chats, {total_messages} new messages "
+            f"({total_skipped} duplicates skipped), {total_chunks} chunks indexed.",
+        )
 
     # Mark job complete in DB
     if job_id:
