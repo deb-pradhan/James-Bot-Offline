@@ -20,7 +20,7 @@ class IngestionJob(Base):
     )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="processing"
-    )  # processing, complete, failed
+    )  # processing, paused, complete, failed, reset
     step: Mapped[str | None] = mapped_column(String(50), nullable=True)
     progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total: Mapped[int | None] = mapped_column(Integer, nullable=True)

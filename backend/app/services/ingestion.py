@@ -54,6 +54,7 @@ async def publish_status(
     progress: int | None = None,
     total: int | None = None,
     *,
+    stats: dict | None = None,
     db: AsyncSession | None = None,
     job_id: uuid.UUID | None = None,
 ):
@@ -66,6 +67,7 @@ async def publish_status(
             "step": step,
             "progress": progress,
             "total": total,
+            "stats": stats,
         },
         "message": message,
     }
@@ -105,14 +107,40 @@ async def ingest_telegram_export(
 
     This runs as a background task — publishes progress to Redis.
     """
+    import asyncio as _asyncio
+
     user_id_str = str(user_id)
     cancel_job_key = f"ingest:cancel_job:{user_id_str}"
+    pause_key = f"ingest:pause_job:{user_id_str}"
+
+    # Live stats dict — sent with every progress event
+    stats = {
+        "contacts_processed": 0,
+        "messages_synced": 0,
+        "duplicates_skipped": 0,
+        "chunks_created": 0,
+        "embeddings_generated": 0,
+        "styles_analyzed": 0,
+    }
 
     async def _status(step: str, message: str, progress: int | None = None, total: int | None = None):
         await publish_status(
             redis_client, user_id_str, step, message,
-            progress=progress, total=total, db=db, job_id=job_id,
+            progress=progress, total=total, stats=stats, db=db, job_id=job_id,
         )
+
+    async def _update_job_status(new_status: str):
+        """Update only the status field of the job row."""
+        if not job_id:
+            return
+        from app.models.job import IngestionJob
+
+        stmt = select(IngestionJob).where(IngestionJob.id == job_id).with_for_update()
+        result = await db.execute(stmt)
+        job = result.scalar_one_or_none()
+        if job:
+            job.status = new_status
+            await db.commit()
 
     async def _raise_if_cancelled(
         step: str,
@@ -121,6 +149,7 @@ async def ingest_telegram_export(
     ):
         if await redis_client.exists(cancel_job_key):
             await redis_client.delete(cancel_job_key)
+            await redis_client.delete(pause_key)  # also clear pause if set
             await _status(
                 step,
                 "Ingestion stopped by user.",
@@ -129,8 +158,30 @@ async def ingest_telegram_export(
             )
             raise IngestionCancelled()
 
-    # Clear any stale stop flag from previous ingestion runs
+    async def _wait_if_paused(
+        step: str,
+        progress: int | None = None,
+        total: int | None = None,
+    ):
+        """Block the pipeline while the pause flag is set. Cancel still works."""
+        if not await redis_client.exists(pause_key):
+            return
+        # Publish paused status + update job row
+        await _status(step, "Paused", progress=progress, total=total)
+        await _update_job_status("paused")
+        # Spin-wait with 1s sleep, checking for cancel
+        while await redis_client.exists(pause_key):
+            if await redis_client.exists(cancel_job_key):
+                await redis_client.delete(pause_key)
+                await _raise_if_cancelled(step, progress, total)
+            await _asyncio.sleep(1)
+        # Resumed
+        await _update_job_status("processing")
+        await _status(step, "Resumed", progress=progress, total=total)
+
+    # Clear any stale stop/pause flags from previous ingestion runs
     await redis_client.delete(cancel_job_key)
+    await redis_client.delete(pause_key)
 
     # ── Step 1: Parse JSON ──
     await _status("parsing", "Parsing Telegram export...")
@@ -176,14 +227,16 @@ async def ingest_telegram_export(
     total_skipped = 0
     contacts_created = []
     total_chunks = 0
+    total_embedded = 0
     cancelled = False
 
     try:
         for i, chat in enumerate(parsed_chats):
             await _raise_if_cancelled("importing", progress=i, total=total_chats)
+            await _wait_if_paused("importing", progress=i, total=total_chats)
             await _status(
                 "importing",
-                f"Importing chat {i + 1}/{total_chats}: {chat.chat_name}",
+                f"Syncing: {chat.chat_name}",
                 progress=i + 1,
                 total=total_chats,
             )
@@ -231,6 +284,11 @@ async def ingest_telegram_export(
                 contact.last_message_at = max(m.sent_at for m in chat.messages)
             total_messages += msg_count
 
+            # Update live stats
+            stats["contacts_processed"] = i + 1
+            stats["messages_synced"] = total_messages
+            stats["duplicates_skipped"] = total_skipped
+
             # Flush every 10 chats to avoid memory bloat
             if (i + 1) % 10 == 0:
                 await db.flush()
@@ -248,9 +306,12 @@ async def ingest_telegram_export(
             await _raise_if_cancelled(
                 "chunking", progress=i, total=len(contacts_created)
             )
+            await _wait_if_paused(
+                "chunking", progress=i, total=len(contacts_created)
+            )
             await _status(
                 "chunking",
-                f"Chunking contact {i + 1}/{len(contacts_created)}: {contact.display_name}",
+                f"Chunking: {contact.display_name}",
                 progress=i + 1,
                 total=len(contacts_created),
             )
@@ -284,6 +345,9 @@ async def ingest_telegram_export(
                 )
                 total_chunks += 1
 
+            # Update live stats
+            stats["chunks_created"] = total_chunks
+
         await db.commit()
         logger.info(f"[INGEST] Created {total_chunks} conversation chunks")
 
@@ -307,10 +371,15 @@ async def ingest_telegram_export(
                 progress=min(i, len(unembedded)),
                 total=len(unembedded),
             )
+            await _wait_if_paused(
+                "embedding",
+                progress=min(i, len(unembedded)),
+                total=len(unembedded),
+            )
             batch = unembedded[i : i + batch_size]
             await _status(
                 "embedding",
-                f"Embedding chunks {min(i + batch_size, len(unembedded))}/{len(unembedded)}",
+                "Generating embeddings...",
                 progress=min(i + batch_size, len(unembedded)),
                 total=len(unembedded),
             )
@@ -323,6 +392,9 @@ async def ingest_telegram_export(
 
             for chunk, emb in zip(batch, embeddings):
                 chunk.embedding = emb
+
+            total_embedded += len(batch)
+            stats["embeddings_generated"] = total_embedded
 
             await db.commit()
 
@@ -350,13 +422,13 @@ async def ingest_telegram_export(
 
             await _status(
                 "analyzing",
-                f"Analyzing communication style for {len(dm_contacts)} DM contacts "
-                f"(skipped {skipped_count} groups/channels)...",
+                f"Analyzing communication styles...",
             )
 
             for i, contact in enumerate(dm_contacts):
                 await _raise_if_cancelled("analyzing", progress=i, total=len(dm_contacts))
-                # Check for cancellation
+                await _wait_if_paused("analyzing", progress=i, total=len(dm_contacts))
+                # Check for analysis-only cancellation
                 if await redis_client.exists(cancel_key):
                     logger.info(f"[INGEST] Style analysis cancelled by user at {i}/{len(dm_contacts)}")
                     await _status(
@@ -370,7 +442,7 @@ async def ingest_telegram_export(
 
                 await _status(
                     "analyzing",
-                    f"Analyzing style for {contact.display_name} ({i + 1}/{len(dm_contacts)})",
+                    f"Analyzing: {contact.display_name}",
                     progress=i + 1,
                     total=len(dm_contacts),
                 )
@@ -385,6 +457,7 @@ async def ingest_telegram_export(
                         user_settings=user_settings,
                     )
                     contact.style_profile = style
+                    stats["styles_analyzed"] = i + 1
                 except Exception as e:
                     logger.warning(
                         f"[INGEST] Style analysis failed for {contact.display_name}: {e}"
@@ -402,6 +475,8 @@ async def ingest_telegram_export(
         "messages_skipped": total_skipped,
         "contacts": len(contacts_created),
         "chunks": total_chunks,
+        "embeddings": total_embedded,
+        "styles_analyzed": stats["styles_analyzed"],
     }
 
     if cancelled:

@@ -29,6 +29,63 @@ class UnrespondedListResponse(BaseModel):
     total: int
 
 
+# ── Critical Actions ─────────────────────────────────────────────
+
+
+class CriticalAction(BaseModel):
+    contact_id: str
+    display_name: str
+    username: str | None = None
+    chat_type: str
+    urgency: str  # "critical" | "high" | "medium"
+    urgency_score: float
+    reason: str  # human-readable why this needs attention
+    unresponded_count: int
+    hours_waiting: float
+    last_message_at: datetime | None = None
+    last_message_preview: str | None = None
+    has_pending_suggestion: bool = False
+    pending_suggestion_id: str | None = None
+    pending_suggestion_text: str | None = None
+
+
+class CriticalActionsResponse(BaseModel):
+    actions: list[CriticalAction]
+    total: int
+    scope: str  # what scope was applied
+
+
+# ── Activity Summary ─────────────────────────────────────────────
+
+
+class ActivitySummaryResponse(BaseModel):
+    summary: str  # markdown-formatted summary
+    since: datetime  # messages since this timestamp
+    contacts_active: int  # how many contacts had activity
+    messages_count: int  # total messages in the window
+    scope: str
+    cached: bool = False  # whether this was served from cache
+
+
+# ── Dashboard Scope ──────────────────────────────────────────────
+
+
+class ScopeOption(BaseModel):
+    id: str
+    label: str
+    chat_type: str | None = None
+    message_count: int = 0
+
+
+class ScopeOptionsResponse(BaseModel):
+    contacts: list[ScopeOption]
+
+
+class ScopeUpdate(BaseModel):
+    scope_type: str  # "all" | "dms" | "groups" | "custom"
+    contact_ids: list[str] = []
+
+
 # ── Cost Tracking ────────────────────────────────────────────────
 
 

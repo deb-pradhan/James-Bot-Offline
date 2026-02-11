@@ -8,12 +8,13 @@ import uuid
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, delete, update
 import redis.asyncio as aioredis
 
 from app.database import get_db
 from app.api.deps import get_current_user, get_redis
 from app.models.user import User
+from app.models.contact import Contact
 from app.models.document import Document
 from app.models.chunk import DocumentChunk
 from app.models.job import IngestionJob
@@ -153,10 +154,13 @@ async def get_active_job(
     Return the most recent active (processing) job for the current user.
     If no processing job, return the last completed/failed job within 60s.
     """
-    # First check for processing jobs
+    # First check for processing or paused jobs
     stmt = (
         select(IngestionJob)
-        .where(IngestionJob.user_id == user.id, IngestionJob.status == "processing")
+        .where(
+            IngestionJob.user_id == user.id,
+            IngestionJob.status.in_(["processing", "paused"]),
+        )
         .order_by(IngestionJob.created_at.desc())
         .limit(1)
     )
@@ -191,6 +195,30 @@ async def get_active_job(
         message=job.message,
         result=job.result,
     )
+
+
+@router.post("/pause")
+async def pause_ingestion(
+    redis_client: aioredis.Redis = Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """Pause the running ingestion job. The pipeline will block at the next check-point."""
+    pause_key = f"ingest:pause_job:{str(user.id)}"
+    await redis_client.set(pause_key, "1", ex=1800)  # auto-expire after 30min
+    logger.info(f"[INGEST] Ingestion pause requested by {user.email}")
+    return {"status": "ok", "message": "Pause signal sent. Ingestion will pause shortly."}
+
+
+@router.post("/resume")
+async def resume_ingestion(
+    redis_client: aioredis.Redis = Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """Resume a paused ingestion job."""
+    pause_key = f"ingest:pause_job:{str(user.id)}"
+    await redis_client.delete(pause_key)
+    logger.info(f"[INGEST] Ingestion resume requested by {user.email}")
+    return {"status": "ok", "message": "Resume signal sent. Ingestion will continue."}
 
 
 @router.post("/stop-analysis")
@@ -282,6 +310,48 @@ async def get_ingestion_history(
         )
 
     return IngestionHistoryResponse(items=items, total=total)
+
+
+@router.post("/reset")
+async def reset_ingestion_data(
+    db: AsyncSession = Depends(get_db),
+    redis_client: aioredis.Redis = Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """
+    Delete ALL ingested Telegram data for the user so they can re-ingest from scratch.
+
+    Cascade-deletes: contacts → messages, conversation_chunks, suggestions.
+    Marks all past ingestion jobs as 'reset'.
+    """
+    # Prevent reset while an ingestion is actively running
+    active_stmt = select(IngestionJob).where(
+        IngestionJob.user_id == user.id,
+        IngestionJob.status.in_(["processing", "paused"]),
+    )
+    active_result = await db.execute(active_stmt)
+    if active_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot reset while an ingestion is running. Stop it first.",
+        )
+
+    logger.info(f"[INGEST] Full data reset requested by {user.email}")
+
+    # Delete all contacts — cascades to messages, chunks, suggestions
+    await db.execute(delete(Contact).where(Contact.user_id == user.id))
+
+    # Mark all ingestion jobs as "reset"
+    await db.execute(
+        update(IngestionJob)
+        .where(IngestionJob.user_id == user.id)
+        .values(status="reset")
+    )
+
+    await db.commit()
+    logger.info(f"[INGEST] Data reset complete for {user.email}")
+
+    return {"status": "ok", "message": "All ingested data cleared. Ready for re-ingestion."}
 
 
 @router.post("/document", response_model=IngestResponse)

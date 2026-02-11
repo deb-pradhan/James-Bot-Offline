@@ -87,6 +87,48 @@ export interface UnrespondedContact {
   pending_suggestion_text?: string | null;
 }
 
+// ── Critical Actions ──
+export interface CriticalAction {
+  contact_id: string;
+  display_name: string;
+  username?: string | null;
+  chat_type: string;
+  urgency: "critical" | "high" | "medium";
+  urgency_score: number;
+  reason: string;
+  unresponded_count: number;
+  hours_waiting: number;
+  last_message_at?: string | null;
+  last_message_preview?: string | null;
+  has_pending_suggestion: boolean;
+  pending_suggestion_id?: string | null;
+  pending_suggestion_text?: string | null;
+}
+
+export interface CriticalActionsResponse {
+  actions: CriticalAction[];
+  total: number;
+  scope: string;
+}
+
+// ── Activity Summary ──
+export interface ActivitySummaryResponse {
+  summary: string;
+  since: string;
+  contacts_active: number;
+  messages_count: number;
+  scope: string;
+  cached: boolean;
+}
+
+// ── Dashboard Scope ──
+export interface ScopeOption {
+  id: string;
+  label: string;
+  chat_type?: string | null;
+  message_count: number;
+}
+
 // ── Query ──
 export interface QueryResponse {
   answer: string;

@@ -11,12 +11,13 @@ class IngestResponse(BaseModel):
 
 class IngestStatusResponse(BaseModel):
     job_id: str
-    status: str  # queued, processing, complete, failed
+    status: str  # processing, paused, complete, failed, reset
     step: str | None = None
     progress: int | None = None
     total: int | None = None
     message: str | None = None
     result: dict | None = None
+    stats: dict | None = None
 
 
 class UrlIngestRequest(BaseModel):

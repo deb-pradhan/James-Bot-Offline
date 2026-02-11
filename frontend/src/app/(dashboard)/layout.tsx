@@ -2,7 +2,10 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
 import { Sidebar } from "@/components/layout/sidebar";
 import { StatusBar } from "@/components/layout/status-bar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,6 +18,11 @@ export default function DashboardLayout({
 }) {
   const { user, loading } = useAuth();
   const router = useRouter();
+
+  const { data: aiStatus } = useQuery({
+    queryKey: ["ai-status"],
+    queryFn: () => api.settings.getAiStatus(),
+  });
 
   useEffect(() => {
     if (!loading && !user) {
@@ -40,6 +48,14 @@ export default function DashboardLayout({
       <div className="flex h-screen overflow-hidden bg-surface-canvas">
         <Sidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
+          {aiStatus && !aiStatus.ai_enabled && (
+            <div className="flex h-9 items-center justify-center gap-2 bg-signal-error px-4 text-xs font-medium text-white">
+              <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
+              <span>
+                AI Kill Switch Active — AI features are currently disabled
+              </span>
+            </div>
+          )}
           <StatusBar />
           <main className="flex-1 overflow-auto p-3 sm:p-4 lg:p-6">
             {children}

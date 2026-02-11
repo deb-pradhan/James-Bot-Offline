@@ -6,6 +6,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useWebSocket } from "@/hooks/use-websocket";
 import {
   Upload,
@@ -13,19 +21,38 @@ import {
   AlertCircle,
   Loader2,
   Square,
+  Pause,
+  Play,
   History,
   Calendar,
   MessageSquare,
   FileJson,
   AlertTriangle,
+  RotateCcw,
+  Users,
+  Database,
+  Layers,
+  Cpu,
+  Sparkles,
+  Ban,
 } from "lucide-react";
 import { toast } from "sonner";
+
+interface IngestionStats {
+  contacts_processed: number;
+  messages_synced: number;
+  duplicates_skipped: number;
+  chunks_created: number;
+  embeddings_generated: number;
+  styles_analyzed: number;
+}
 
 interface IngestionStep {
   step: string;
   label: string;
   progress?: number;
   total?: number;
+  stats?: IngestionStats;
 }
 
 interface HistoryItem {
@@ -43,28 +70,34 @@ interface HistoryItem {
   ingested_at: string;
 }
 
-const STEP_LABELS: Record<string, string> = {
-  parsing: "Parsing export file",
-  importing: "Importing contacts & messages",
-  chunking: "Chunking conversations",
-  embedding: "Generating embeddings",
-  analyzing: "Analyzing communication styles",
-  complete: "Ingestion complete!",
+type PageStatus = "idle" | "uploading" | "processing" | "paused" | "stopping" | "complete" | "error";
+
+const EMPTY_STATS: IngestionStats = {
+  contacts_processed: 0,
+  messages_synced: 0,
+  duplicates_skipped: 0,
+  chunks_created: 0,
+  embeddings_generated: 0,
+  styles_analyzed: 0,
 };
 
 export default function IngestPage() {
-  const [status, setStatus] = useState<"idle" | "uploading" | "processing" | "stopping" | "complete" | "error">("idle");
+  const [status, setStatus] = useState<PageStatus>("idle");
   const [currentStep, setCurrentStep] = useState<IngestionStep | null>(null);
+  const [liveStats, setLiveStats] = useState<IngestionStats>(EMPTY_STATS);
   const [result, setResult] = useState<Record<string, number> | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const { lastEvent } = useWebSocket();
   const checkedRef = useRef(false);
   const lastProcessedEventRef = useRef<string | null>(null);
   const noActiveJobToastRef = useRef(false);
   const isStopping = status === "stopping";
-  const isProcessingOrStopping = status === "processing" || status === "stopping";
+  const isPaused = status === "paused";
+  const isActive = status === "processing" || status === "paused" || status === "stopping";
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -87,11 +120,11 @@ export default function IngestPage() {
 
     api.ingest.status().then((job) => {
       if (!job) return;
-      if (job.status === "processing") {
-        setStatus("processing");
+      if (job.status === "processing" || job.status === "paused") {
+        setStatus(job.status);
         setCurrentStep({
           step: job.step ?? "parsing",
-          label: STEP_LABELS[job.step ?? "parsing"] ?? job.message ?? "Processing...",
+          label: job.message ?? "Processing...",
           progress: job.progress ?? undefined,
           total: job.total ?? undefined,
         });
@@ -107,18 +140,28 @@ export default function IngestPage() {
     });
   }, [fetchHistory]);
 
-  // Track WebSocket events for progress — in useEffect to avoid setState during render
+  // Track WebSocket events for progress
   useEffect(() => {
     if (!lastEvent) return;
 
-    // Deduplicate: create a fingerprint so we don't process the same event twice
     const fingerprint = JSON.stringify(lastEvent);
     if (fingerprint === lastProcessedEventRef.current) return;
     lastProcessedEventRef.current = fingerprint;
 
-    if (lastEvent.type === "ingestion_progress" && (status === "processing" || status === "stopping")) {
-      const data = lastEvent.data as { step?: string; progress?: number; total?: number };
+    if (lastEvent.type === "ingestion_progress" && isActive) {
+      const data = lastEvent.data as {
+        step?: string;
+        progress?: number;
+        total?: number;
+        stats?: IngestionStats;
+      };
       const step = data?.step ?? "";
+      const message = (lastEvent.message as string) ?? "";
+
+      // Update live stats if present
+      if (data?.stats) {
+        setLiveStats(data.stats);
+      }
 
       // If step is "complete", transition immediately
       if (step === "complete") {
@@ -128,47 +171,67 @@ export default function IngestPage() {
         return;
       }
 
-      // Check if the message indicates a stop (backend sends "stopped by user" message)
-      const message = lastEvent.message ?? "";
-      const isStopped = message.toLowerCase().includes("stopped by user");
+      // Paused
+      if (message === "Paused") {
+        setStatus("paused");
+        setCurrentStep({
+          step,
+          label: "Paused",
+          progress: data?.progress ?? undefined,
+          total: data?.total ?? undefined,
+          stats: data?.stats ?? undefined,
+        });
+        return;
+      }
 
+      // Resumed
+      if (message === "Resumed") {
+        setStatus("processing");
+      }
+
+      // Stopped by user
+      const isStopped = message.toLowerCase().includes("stopped by user");
       if (isStopped) {
-        // Ingestion stop was requested — we'll get "complete" step momentarily
         setStatus("stopping");
         setCurrentStep({
           step,
           label: "Wrapping up — stopping ingestion",
           progress: data?.progress ?? undefined,
           total: data?.total ?? undefined,
+          stats: data?.stats ?? undefined,
         });
         return;
       }
 
-      setCurrentStep({
-        step,
-        label: STEP_LABELS[step] ?? message ?? "Processing...",
-        progress: data?.progress ?? undefined,
-        total: data?.total ?? undefined,
-      });
+      // Normal progress update — use the descriptive message from backend
+      if (status !== "paused") {
+        setCurrentStep({
+          step,
+          label: message || "Processing...",
+          progress: data?.progress ?? undefined,
+          total: data?.total ?? undefined,
+          stats: data?.stats ?? undefined,
+        });
+      }
     }
 
-    if (lastEvent.type === "ingestion_complete" && (status === "processing" || status === "stopping")) {
+    if (lastEvent.type === "ingestion_complete" && isActive) {
       setStatus("complete");
       setResult(lastEvent.data as Record<string, number>);
       setCurrentStep(null);
       fetchHistory();
     }
 
-    if (lastEvent.type === "error" && (status === "processing" || status === "stopping")) {
+    if (lastEvent.type === "error" && isActive) {
       setStatus("error");
-      setErrorMessage(lastEvent.message ?? "Ingestion failed");
+      setErrorMessage((lastEvent.message as string) ?? "Ingestion failed");
       setCurrentStep(null);
     }
-  }, [lastEvent, status, fetchHistory]);
+  }, [lastEvent, status, isActive, fetchHistory]);
 
   // Poll active ingestion status as a fallback when WS events are missed
   useEffect(() => {
-    if (!isProcessingOrStopping) {
+    if (!isActive) {
       noActiveJobToastRef.current = false;
       return;
     }
@@ -183,6 +246,7 @@ export default function IngestPage() {
         if (!job) {
           setStatus("idle");
           setCurrentStep(null);
+          setLiveStats(EMPTY_STATS);
           if (!noActiveJobToastRef.current) {
             toast.warning("No active ingestion job found. Processing view reset.");
             noActiveJobToastRef.current = true;
@@ -195,7 +259,19 @@ export default function IngestPage() {
           setStatus((prev) => (prev === "stopping" ? prev : "processing"));
           setCurrentStep({
             step: job.step ?? "parsing",
-            label: STEP_LABELS[job.step ?? "parsing"] ?? job.message ?? "Processing...",
+            label: job.message ?? "Processing...",
+            progress: job.progress ?? undefined,
+            total: job.total ?? undefined,
+          });
+          return;
+        }
+
+        if (job.status === "paused") {
+          noActiveJobToastRef.current = false;
+          setStatus("paused");
+          setCurrentStep({
+            step: job.step ?? "parsing",
+            label: "Paused",
             progress: job.progress ?? undefined,
             total: job.total ?? undefined,
           });
@@ -229,7 +305,7 @@ export default function IngestPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isProcessingOrStopping, fetchHistory]);
+  }, [isActive, fetchHistory]);
 
   const handleFileUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -242,10 +318,11 @@ export default function IngestPage() {
       }
 
       setStatus("uploading");
+      setLiveStats(EMPTY_STATS);
       try {
         const res = await api.ingest.telegram(file);
         setStatus("processing");
-        setCurrentStep({ step: "parsing", label: STEP_LABELS.parsing });
+        setCurrentStep({ step: "parsing", label: "Parsing Telegram export..." });
         if (res.duplicate_warning) {
           toast.warning(res.duplicate_warning, { duration: 8000 });
         }
@@ -262,6 +339,26 @@ export default function IngestPage() {
     []
   );
 
+  const handlePause = useCallback(async () => {
+    try {
+      await api.ingest.pause();
+      setStatus("paused");
+      toast.success("Pausing — will pause after current item finishes.");
+    } catch {
+      toast.error("Failed to pause ingestion");
+    }
+  }, []);
+
+  const handleResume = useCallback(async () => {
+    try {
+      await api.ingest.resume();
+      setStatus("processing");
+      toast.success("Resuming ingestion...");
+    } catch {
+      toast.error("Failed to resume ingestion");
+    }
+  }, []);
+
   const handleStopProcessing = useCallback(async () => {
     try {
       await api.ingest.stop();
@@ -271,6 +368,24 @@ export default function IngestPage() {
       toast.error("Failed to stop ingestion");
     }
   }, []);
+
+  const handleReset = useCallback(async () => {
+    setResetting(true);
+    try {
+      await api.ingest.reset();
+      setResetDialogOpen(false);
+      setStatus("idle");
+      setResult(null);
+      setLiveStats(EMPTY_STATS);
+      setCurrentStep(null);
+      toast.success("All data cleared. You can now re-ingest your chat history.");
+      fetchHistory();
+    } catch {
+      toast.error("Failed to reset data. Make sure no ingestion is running.");
+    } finally {
+      setResetting(false);
+    }
+  }, [fetchHistory]);
 
   const progressPercent =
     currentStep?.progress !== undefined &&
@@ -323,13 +438,19 @@ export default function IngestPage() {
               <Loader2 className="mb-4 h-12 w-12 animate-spin text-primary" strokeWidth={1.5} />
               <p className="text-sm text-ink-primary">Uploading...</p>
             </div>
-          ) : isProcessingOrStopping ? (
+          ) : isActive ? (
             <div className="space-y-6 py-8">
+              {/* Header icon + status */}
               <div className="text-center">
                 {isStopping ? (
                   <>
                     <Square className="mx-auto mb-4 h-12 w-12 text-signal-warning" strokeWidth={1.5} />
-                    <p className="text-sm text-ink-primary">Stopping — finishing current contact...</p>
+                    <p className="text-sm text-ink-primary">Stopping — finishing current item...</p>
+                  </>
+                ) : isPaused ? (
+                  <>
+                    <Pause className="mx-auto mb-4 h-12 w-12 text-signal-warning" strokeWidth={1.5} />
+                    <p className="text-sm text-ink-primary">Ingestion paused</p>
                   </>
                 ) : (
                   <>
@@ -339,108 +460,88 @@ export default function IngestPage() {
                 )}
               </div>
 
-              {/* Current Step */}
+              {/* Current activity label + progress bar */}
               <div className="mx-auto max-w-md space-y-2">
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-ink-primary">
+                  <span className="text-ink-primary truncate">
                     {currentStep?.label ?? "Processing..."}
                   </span>
                   {progressPercent !== undefined && (
-                    <span className="text-ink-tertiary font-mono text-xs">
+                    <span className="text-ink-tertiary font-mono text-xs ml-2 shrink-0">
                       {progressPercent}%
                     </span>
                   )}
                 </div>
-                <Progress value={progressPercent ?? 50} />
-                {currentStep?.progress && currentStep?.total && (
-                  <p className="text-center text-xs text-ink-tertiary font-mono">
-                    {currentStep.progress} / {currentStep.total}
-                  </p>
-                )}
+                <Progress value={progressPercent ?? (isPaused ? progressPercent ?? 0 : 50)} />
               </div>
 
-              {/* Stop Processing Button — available for all ingestion steps */}
+              {/* Controls: Pause/Resume + Stop */}
               {!isStopping && (
-                <div className="flex justify-center">
+                <div className="flex justify-center gap-3">
+                  {isPaused ? (
+                    <Button
+                      variant="default"
+                      size="sm"
+                      onClick={handleResume}
+                    >
+                      <Play className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
+                      Resume
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handlePause}
+                    >
+                      <Pause className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
+                      Pause
+                    </Button>
+                  )}
                   <Button
                     variant="destructive"
                     size="sm"
                     onClick={handleStopProcessing}
                   >
                     <Square className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
-                    Stop Processing
+                    Stop
                   </Button>
                 </div>
               )}
 
-              {/* Step Overview */}
-              <div className="mx-auto max-w-xs space-y-2">
-                {Object.entries(STEP_LABELS)
-                  .filter(([k]) => k !== "complete")
-                  .map(([key, label]) => {
-                    const stepOrder = ["parsing", "importing", "chunking", "embedding", "analyzing"];
-                    const currentIdx = stepOrder.indexOf(currentStep?.step ?? "");
-                    const thisIdx = stepOrder.indexOf(key);
-                    const isDone = thisIdx < currentIdx || (isStopping && thisIdx <= currentIdx);
-                    const isCurrent = key === currentStep?.step && !isStopping;
-
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center gap-2 text-sm"
-                      >
-                        {isDone ? (
-                          <CheckCircle2 className="h-4 w-4 text-signal-success" strokeWidth={1.5} />
-                        ) : isCurrent ? (
-                          <Loader2 className="h-4 w-4 animate-spin text-primary" strokeWidth={1.5} />
-                        ) : (
-                          <div className="h-4 w-4 border border-border-grid" />
-                        )}
-                        <span
-                          className={
-                            isDone
-                              ? "text-signal-success"
-                              : isCurrent
-                                ? "text-ink-primary"
-                                : "text-ink-tertiary"
-                          }
-                        >
-                          {key === "analyzing" && isStopping
-                            ? "Style analysis stopped"
-                            : label}
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
+              {/* Live Stats Grid */}
+              <StatsGrid stats={liveStats} dimUnreached={true} currentStep={currentStep?.step} />
             </div>
           ) : (
             /* Complete */
             <div className="flex flex-col items-center py-12">
               <CheckCircle2 className="mb-4 h-16 w-16 text-signal-success" strokeWidth={1.5} />
-              <p className="text-sm text-ink-primary">Ingestion Complete!</p>
+              <p className="text-sm text-ink-primary">
+                {result?.stopped ? "Ingestion Stopped" : "Ingestion Complete!"}
+              </p>
+
               {result && (
-                <div className="mt-4 flex gap-6 text-center">
-                  <div>
-                    <p className="text-2xl font-light font-mono text-ink-primary">{result.chats}</p>
-                    <p className="text-label text-ink-tertiary mt-1">Chats</p>
-                  </div>
-                  <div>
-                    <p className="text-2xl font-light font-mono text-ink-primary">{result.messages}</p>
-                    <p className="text-label text-ink-tertiary mt-1">Messages</p>
-                  </div>
-                  <div>
-                    <p className="text-2xl font-light font-mono text-ink-primary">{result.chunks}</p>
-                    <p className="text-label text-ink-tertiary mt-1">Chunks</p>
-                  </div>
+                <div className="mt-6 w-full max-w-md">
+                  <StatsGrid
+                    stats={{
+                      contacts_processed: result.contacts ?? result.chats ?? 0,
+                      messages_synced: result.messages ?? 0,
+                      duplicates_skipped: result.messages_skipped ?? 0,
+                      chunks_created: result.chunks ?? 0,
+                      embeddings_generated: result.embeddings ?? result.chunks ?? 0,
+                      styles_analyzed: result.styles_analyzed ?? 0,
+                    }}
+                    dimUnreached={false}
+                  />
                 </div>
               )}
+
               <Button
                 variant="outline"
                 className="mt-6"
                 onClick={() => {
                   setStatus("idle");
                   setResult(null);
+                  setLiveStats(EMPTY_STATS);
                 }}
               >
                 Upload Another
@@ -453,10 +554,23 @@ export default function IngestPage() {
       {/* Ingestion History */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <History className="h-4 w-4 text-primary" strokeWidth={1.5} />
-            Ingestion History
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <History className="h-4 w-4 text-primary" strokeWidth={1.5} />
+              Ingestion History
+            </CardTitle>
+            {history.length > 0 && !isActive && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-signal-error hover:text-signal-error hover:bg-signal-error/10"
+                onClick={() => setResetDialogOpen(true)}
+              >
+                <RotateCcw className="mr-2 h-3.5 w-3.5" strokeWidth={1.5} />
+                Reset &amp; Re-ingest
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
           {historyLoading ? (
@@ -576,6 +690,133 @@ export default function IngestPage() {
           <p>5. Upload the resulting <code className="font-mono text-primary text-xs">result.json</code> file here</p>
         </CardContent>
       </Card>
+
+      {/* Reset Confirmation Dialog */}
+      <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-signal-error" strokeWidth={1.5} />
+              Reset All Ingested Data
+            </DialogTitle>
+            <DialogDescription className="text-left space-y-2 pt-2">
+              <span className="block">
+                This will permanently delete <strong>all</strong> your ingested data:
+              </span>
+              <span className="block text-xs text-ink-tertiary space-y-1">
+                <span className="block">• All contacts and their messages</span>
+                <span className="block">• All conversation chunks and embeddings</span>
+                <span className="block">• All style profiles and suggestions</span>
+              </span>
+              <span className="block pt-1">
+                You&apos;ll need to re-upload your Telegram export to rebuild everything from scratch.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setResetDialogOpen(false)}
+              disabled={resetting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleReset}
+              disabled={resetting}
+            >
+              {resetting ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
+              ) : (
+                <RotateCcw className="mr-2 h-4 w-4" strokeWidth={1.5} />
+              )}
+              {resetting ? "Deleting..." : "Delete & Reset"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/* ─── Live Stats Grid Component ─── */
+
+const STAT_CONFIG = [
+  { key: "contacts_processed" as const, label: "Contacts", icon: Users, reachStep: "importing" },
+  { key: "messages_synced" as const, label: "Messages", icon: MessageSquare, reachStep: "importing" },
+  { key: "duplicates_skipped" as const, label: "Duplicates Skipped", icon: Ban, reachStep: "importing", warnIfPositive: true },
+  { key: "chunks_created" as const, label: "Chunks", icon: Layers, reachStep: "chunking" },
+  { key: "embeddings_generated" as const, label: "Embeddings", icon: Cpu, reachStep: "embedding" },
+  { key: "styles_analyzed" as const, label: "Styles", icon: Sparkles, reachStep: "analyzing" },
+];
+
+const STEP_ORDER = ["parsing", "importing", "chunking", "embedding", "analyzing", "complete"];
+
+function StatsGrid({
+  stats,
+  dimUnreached = false,
+  currentStep,
+}: {
+  stats: IngestionStats;
+  dimUnreached?: boolean;
+  currentStep?: string;
+}) {
+  const currentIdx = currentStep ? STEP_ORDER.indexOf(currentStep) : STEP_ORDER.length;
+
+  return (
+    <div className="grid grid-cols-3 gap-3 mx-auto max-w-md">
+      {STAT_CONFIG.map(({ key, label, icon: Icon, reachStep, warnIfPositive }) => {
+        const stepIdx = STEP_ORDER.indexOf(reachStep);
+        const reached = !dimUnreached || currentIdx >= stepIdx;
+        const value = stats[key];
+        const isWarn = warnIfPositive && value > 0;
+
+        // Hide "Duplicates Skipped" if 0
+        if (key === "duplicates_skipped" && value === 0 && dimUnreached) {
+          return (
+            <div key={key} className="flex flex-col items-center gap-1 rounded-lg border border-border-grid p-3 opacity-30">
+              <Icon className="h-4 w-4 text-ink-tertiary" strokeWidth={1.5} />
+              <span className="text-[10px] text-ink-tertiary">{label}</span>
+              <span className="text-lg font-light font-mono text-ink-tertiary">--</span>
+            </div>
+          );
+        }
+
+        return (
+          <div
+            key={key}
+            className={`flex flex-col items-center gap-1 rounded-lg border p-3 transition-opacity ${
+              reached
+                ? isWarn
+                  ? "border-signal-warning/30 bg-signal-warning/5"
+                  : "border-border-grid"
+                : "border-border-grid opacity-30"
+            }`}
+          >
+            <Icon
+              className={`h-4 w-4 ${
+                isWarn ? "text-signal-warning" : reached ? "text-ink-secondary" : "text-ink-tertiary"
+              }`}
+              strokeWidth={1.5}
+            />
+            <span className={`text-[10px] ${isWarn ? "text-signal-warning" : "text-ink-tertiary"}`}>
+              {label}
+            </span>
+            <span
+              className={`text-lg font-light font-mono ${
+                reached
+                  ? isWarn
+                    ? "text-signal-warning"
+                    : "text-ink-primary"
+                  : "text-ink-tertiary"
+              }`}
+            >
+              {reached ? value.toLocaleString() : "--"}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

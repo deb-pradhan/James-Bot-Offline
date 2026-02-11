@@ -79,6 +79,17 @@ export const api = {
     overview: () => request("/api/dashboard/overview"),
     unresponded: () => request("/api/dashboard/unresponded"),
     costs: () => request("/api/dashboard/costs"),
+    criticalActions: () => request("/api/dashboard/critical-actions"),
+    activitySummary: (force?: boolean) =>
+      request(`/api/dashboard/activity-summary${force ? "?force=true" : ""}`),
+    scopeOptions: () => request("/api/dashboard/scope-options"),
+    updateScope: (scopeType: string, contactIds: string[] = []) =>
+      request("/api/dashboard/scope", {
+        method: "PUT",
+        body: JSON.stringify({ scope_type: scopeType, contact_ids: contactIds }),
+      }),
+    markVisited: () =>
+      request("/api/dashboard/mark-visited", { method: "POST" }),
   },
 
   // ── Contacts ──
@@ -176,12 +187,24 @@ export const api = {
         message: string | null;
         result: Record<string, number> | null;
       } | null>("/api/ingest/active"),
+    pause: () =>
+      request<{ status: string; message: string }>("/api/ingest/pause", {
+        method: "POST",
+      }),
+    resume: () =>
+      request<{ status: string; message: string }>("/api/ingest/resume", {
+        method: "POST",
+      }),
     stopAnalysis: () =>
       request<{ status: string; message: string }>("/api/ingest/stop-analysis", {
         method: "POST",
       }),
     stop: () =>
       request<{ status: string; message: string }>("/api/ingest/stop", {
+        method: "POST",
+      }),
+    reset: () =>
+      request<{ status: string; message: string }>("/api/ingest/reset", {
         method: "POST",
       }),
     history: (params?: { limit?: number; offset?: number }) => {
