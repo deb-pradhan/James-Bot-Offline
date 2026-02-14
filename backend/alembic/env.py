@@ -53,10 +53,16 @@ def do_run_migrations(connection):
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine."""
+    # Disable SSL for Railway internal connections (asyncpg hangs on SSL negotiation)
+    connect_args: dict = {}
+    if ".railway.internal" in settings.database_url:
+        connect_args["ssl"] = False
+
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     async with connectable.connect() as connection:

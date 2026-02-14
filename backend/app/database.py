@@ -1,4 +1,5 @@
 import logging
+import ssl as _ssl
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
@@ -8,11 +9,18 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+# Railway internal networking doesn't need SSL; asyncpg hangs during
+# SSL negotiation on .railway.internal hosts.  Disable it explicitly.
+_connect_args: dict = {}
+if ".railway.internal" in settings.database_url:
+    _connect_args["ssl"] = False
+
 engine = create_async_engine(
     settings.async_database_url,
     echo=settings.debug,
     pool_size=20,
     max_overflow=10,
+    connect_args=_connect_args,
 )
 
 async_session = async_sessionmaker(
