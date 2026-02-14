@@ -1,5 +1,9 @@
 """
 Telegram event handlers for the monitor service.
+
+Respects global pause: when `user:paused:{user_id}` is set in Redis,
+real-time messages are NOT relayed to the consumer. They stay in Telegram
+and will be picked up by the catch-up sync on resume.
 """
 
 import logging
@@ -22,6 +26,14 @@ def register_handlers(
     async def on_incoming_message(event):
         """Handle incoming messages from other users."""
         try:
+            # ── Pause guard ──
+            if await relay.is_user_paused(user_id):
+                logger.info(
+                    f"[MONITOR] PAUSED — dropping incoming message from "
+                    f"chat {event.chat_id} (will catch up on resume)"
+                )
+                return
+
             sender = await event.get_sender()
             chat = await event.get_chat()
 
@@ -37,6 +49,7 @@ def register_handlers(
                 ),
                 "sender_id": str(sender.id),
                 "sender_name": getattr(sender, "first_name", "Unknown"),
+                "self_tg_id": str(self_tg_id),
                 "text": event.message.text,
                 "date": event.message.date.isoformat(),
                 "is_incoming": True,
@@ -56,6 +69,14 @@ def register_handlers(
     async def on_outgoing_message(event):
         """Handle outgoing messages (sent by James himself)."""
         try:
+            # ── Pause guard ──
+            if await relay.is_user_paused(user_id):
+                logger.info(
+                    f"[MONITOR] PAUSED — dropping outgoing message to "
+                    f"chat {event.chat_id} (will catch up on resume)"
+                )
+                return
+
             chat = await event.get_chat()
 
             if not event.message.text:
@@ -70,6 +91,7 @@ def register_handlers(
                 ),
                 "sender_id": str(self_tg_id),
                 "sender_name": "self",
+                "self_tg_id": str(self_tg_id),
                 "text": event.message.text,
                 "date": event.message.date.isoformat(),
                 "is_incoming": False,

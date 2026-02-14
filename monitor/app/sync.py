@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 MAX_DIALOGS = 200  # Top N most recent dialogs
 MESSAGES_PER_DIALOG = 30  # Last N messages per dialog
 BATCH_DELAY = 0.05  # 50ms pause every 10 messages to pace the consumer
+PAUSE_WAIT_TIMEOUT = 300  # Max seconds to wait when paused before auto-aborting (5 min)
 
 
 def _classify_entity(entity) -> tuple[str, str] | None:
@@ -70,8 +71,47 @@ async def initial_sync(
 
         total_messages = 0
         synced_dialogs = 0
+        paused_since = None  # Track when we first noticed the pause
 
         for dialog in dialogs:
+            # ── Pause check: stop syncing if user paused ──
+            if await relay.is_user_paused(user_id):
+                if paused_since is None:
+                    paused_since = synced_dialogs
+                    logger.info(
+                        f"[SYNC] PAUSED — user {user_id} paused at dialog "
+                        f"{synced_dialogs}/{len(dialogs)}. Waiting for resume..."
+                    )
+                    await relay.publish_status(
+                        user_id,
+                        "processing_status",
+                        {"message": f"Sync paused at {synced_dialogs}/{len(dialogs)} conversations"},
+                    )
+
+                # Wait until unpaused, with timeout to avoid blocking forever
+                waited = 0
+                while await relay.is_user_paused(user_id):
+                    await asyncio.sleep(2)
+                    waited += 2
+                    if waited >= PAUSE_WAIT_TIMEOUT:
+                        logger.info(
+                            f"[SYNC] TIMEOUT — user {user_id} paused for {waited}s, "
+                            f"aborting sync at {synced_dialogs}/{len(dialogs)}"
+                        )
+                        await relay.publish_status(
+                            user_id,
+                            "processing_status",
+                            {"message": "Sync stopped (paused too long). Resume to continue."},
+                        )
+                        return  # Abort sync
+
+                # Resumed
+                logger.info(
+                    f"[SYNC] RESUMED — continuing sync from dialog "
+                    f"{synced_dialogs}/{len(dialogs)}"
+                )
+                paused_since = None
+
             entity = dialog.entity
             info = _classify_entity(entity)
             if info is None:
@@ -124,6 +164,7 @@ async def initial_sync(
                     "chat_type": chat_type,
                     "sender_id": str(msg.sender_id) if msg.sender_id else chat_id,
                     "sender_name": sender_name,
+                    "self_tg_id": str(self_tg_id),
                     "text": msg.text,
                     "date": msg.date.isoformat(),
                     "is_incoming": is_incoming,

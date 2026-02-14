@@ -111,7 +111,7 @@ async def ingest_telegram_export(
 
     user_id_str = str(user_id)
     cancel_job_key = f"ingest:cancel_job:{user_id_str}"
-    pause_key = f"ingest:pause_job:{user_id_str}"
+    pause_key = f"user:paused:{user_id_str}"
 
     # Live stats dict — sent with every progress event
     stats = {
@@ -149,7 +149,8 @@ async def ingest_telegram_export(
     ):
         if await redis_client.exists(cancel_job_key):
             await redis_client.delete(cancel_job_key)
-            await redis_client.delete(pause_key)  # also clear pause if set
+            # NOTE: Do NOT clear pause_key — /stop intentionally sets user:paused
+            # so background processing stays paused until the user explicitly resumes.
             await _status(
                 step,
                 "Ingestion stopped by user.",
@@ -172,16 +173,17 @@ async def ingest_telegram_export(
         # Spin-wait with 1s sleep, checking for cancel
         while await redis_client.exists(pause_key):
             if await redis_client.exists(cancel_job_key):
-                await redis_client.delete(pause_key)
+                # Don't delete pause_key — /stop keeps it set intentionally
                 await _raise_if_cancelled(step, progress, total)
             await _asyncio.sleep(1)
         # Resumed
         await _update_job_status("processing")
         await _status(step, "Resumed", progress=progress, total=total)
 
-    # Clear any stale stop/pause flags from previous ingestion runs
+    # Clear any stale stop flag from previous ingestion runs
+    # NOTE: Do NOT clear pause_key here — it's the global user:paused flag
+    # shared by all services. Clearing it would silently unpause the user.
     await redis_client.delete(cancel_job_key)
-    await redis_client.delete(pause_key)
 
     # ── Step 1: Parse JSON ──
     await _status("parsing", "Parsing Telegram export...")
@@ -260,6 +262,7 @@ async def ingest_telegram_export(
                     continue
                 sender_type = "self" if msg.sender_id == self_id else "other"
                 db_msg = Message(
+                    user_id=user_id,
                     contact_id=contact.id,
                     telegram_msg_id=msg.telegram_msg_id,
                     sender_type=sender_type,
@@ -336,6 +339,7 @@ async def ingest_telegram_export(
             for chunk in chunks:
                 db.add(
                     ConversationChunk(
+                        user_id=user_id,
                         contact_id=contact.id,
                         chunk_text=chunk.text,
                         session_start=chunk.start,

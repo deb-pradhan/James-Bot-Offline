@@ -186,6 +186,8 @@ export const api = {
         total: number | null;
         message: string | null;
         result: Record<string, number> | null;
+        globally_paused: boolean;
+        paused_at: string | null;
       } | null>("/api/ingest/active"),
     pause: () =>
       request<{ status: string; message: string }>("/api/ingest/pause", {
@@ -300,5 +302,13 @@ export const api = {
         has_custom_api_key: boolean;
         using_custom_key: boolean;
       }>("/api/settings/ai-status"),
+    deleteAllData: (options: { confirm: boolean; keepAccount?: boolean }) =>
+      request<{ status: string; message: string }>("/api/settings/delete-all-data", {
+        method: "DELETE",
+        body: JSON.stringify({
+          confirm: options.confirm,
+          keep_account: options.keepAccount ?? true,
+        }),
+      }),
   },
 };

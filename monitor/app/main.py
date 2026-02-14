@@ -71,7 +71,7 @@ async def start_monitor(
     async def _push_name():
         await asyncio.sleep(3)
         await relay.redis.publish(
-            "telegram:update_user_name",
+            f"telegram:update_user_name:{user_id}",
             json.dumps({"user_id": user_id, "name": tg_display_name}),
         )
     asyncio.create_task(_push_name())
@@ -84,15 +84,11 @@ async def start_monitor(
     # Dedup ensures real-time messages arriving during sync aren't doubled.
     await initial_sync(client, relay, user_id, me.id)
 
-    # Listen for send commands in a separate task
+    # Listen for send commands in a separate task (user-scoped channel)
     async def handle_send_commands():
-        async for raw in relay.subscribe_send_commands():
+        async for raw in relay.subscribe_send_commands(user_id):
             try:
                 data = json.loads(raw)
-                # Only process commands for this user
-                if data.get("user_id") != user_id:
-                    continue
-
                 chat_id = int(data["chat_id"])
                 text = data["text"]
                 mode = data.get("mode", "draft")
@@ -163,6 +159,11 @@ async def main():
         await relay.redis.set(key, "false")
     logger.info("[MONITOR] Reset stale connection flags")
 
+    # Track users currently being started to prevent duplicate task creation
+    # (race condition: task may not have set connected=true yet)
+    starting_users: set[str] = set()
+    active_tasks: dict[str, asyncio.Task] = {}
+
     while True:
         try:
             # Scan for all session keys
@@ -172,23 +173,44 @@ async def main():
 
             for key in keys:
                 user_id = key.split(":")[-1]
-                connected = await relay.redis.get(f"telegram:connected:{user_id}")
 
+                # Skip if already connected OR currently starting
+                if user_id in starting_users:
+                    continue
+
+                connected = await relay.redis.get(f"telegram:connected:{user_id}")
                 if connected == "true":
                     continue  # Already monitoring
 
                 session_data = await relay.get_session_data(user_id)
                 if session_data:
                     logger.info(f"[MONITOR] Found session for user {user_id}, starting...")
-                    asyncio.create_task(
-                        start_monitor(
-                            session_string=session_data["session_string"],
-                            api_id=session_data["api_id"],
-                            api_hash=session_data["api_hash"],
-                            user_id=user_id,
-                            relay=relay,
-                        )
-                    )
+
+                    # Mark as starting BEFORE creating task to prevent duplicates
+                    starting_users.add(user_id)
+
+                    async def wrapped_start(uid: str, sdata: dict):
+                        try:
+                            await start_monitor(
+                                session_string=sdata["session_string"],
+                                api_id=sdata["api_id"],
+                                api_hash=sdata["api_hash"],
+                                user_id=uid,
+                                relay=relay,
+                            )
+                        finally:
+                            # Always remove from starting set when done
+                            starting_users.discard(uid)
+                            active_tasks.pop(uid, None)
+
+                    task = asyncio.create_task(wrapped_start(user_id, session_data))
+                    active_tasks[user_id] = task
+
+            # Clean up completed tasks (shouldn't happen often, but just in case)
+            done_users = [uid for uid, t in active_tasks.items() if t.done()]
+            for uid in done_users:
+                starting_users.discard(uid)
+                active_tasks.pop(uid, None)
 
         except Exception as e:
             logger.error(f"[MONITOR] Poll error: {e}")

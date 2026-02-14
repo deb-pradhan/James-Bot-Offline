@@ -6,6 +6,11 @@ Subscribes to Redis `telegram:new_messages` channel and for each message:
 2. Saves message to DB (dedup by telegram_msg_id)
 3. Updates contact stats (total_messages, last_message_at, unresponded_count)
 4. Periodically chunks + embeds recent messages for the contact
+
+Respects the global pause flag `user:paused:{user_id}` — when set:
+- Messages are STILL saved to DB (prevents data loss from pub/sub)
+- Heavy processing is SKIPPED: rechunking, embedding, auto-suggestions
+- On resume, `run_catchup_processing()` handles the accumulated backlog
 """
 
 import asyncio
@@ -36,6 +41,11 @@ RECHUNK_THRESHOLD = 5
 _pending_rechunk: dict[uuid.UUID, int] = {}
 # Lock to prevent concurrent re-chunk for the same contact
 _rechunk_locks: dict[uuid.UUID, asyncio.Lock] = {}
+
+
+async def _is_user_paused(redis_client: aioredis.Redis, user_id: uuid.UUID) -> bool:
+    """Check if a user has global processing paused."""
+    return await redis_client.exists(f"user:paused:{str(user_id)}") > 0
 
 
 async def _get_or_create_contact(
@@ -100,6 +110,7 @@ async def _save_message(
         sent_at = datetime.utcnow()
 
     message = Message(
+        user_id=contact.user_id,
         contact_id=contact.id,
         telegram_msg_id=telegram_msg_id,
         sender_type="other" if is_incoming else "self",
@@ -127,15 +138,34 @@ async def _save_message(
 async def _rechunk_and_embed_contact(
     user_id: uuid.UUID,
     contact_id: uuid.UUID,
+    redis_client: aioredis.Redis | None = None,
 ):
-    """Re-chunk and embed all messages for a contact."""
+    """Re-chunk and embed all messages for a contact.
+
+    Checks global pause state at entry AND before the expensive embedding step.
+    If paused, bails out — catch-up will handle it on resume.
+    """
     lock = _rechunk_locks.setdefault(contact_id, asyncio.Lock())
 
     async with lock:
+        # ── Pause guard (entry) ──
+        if redis_client and await _is_user_paused(redis_client, user_id):
+            logger.info(
+                f"[CONSUMER] PAUSED — skipping rechunk for contact {contact_id} "
+                f"(will catch up on resume)"
+            )
+            return
+
         async with async_session() as db:
             try:
                 contact = await db.get(Contact, contact_id)
                 if not contact:
+                    return
+                if contact.user_id != user_id:
+                    logger.error(
+                        f"[CONSUMER] Ownership mismatch: contact {contact_id} "
+                        f"belongs to {contact.user_id}, not {user_id}"
+                    )
                     return
 
                 logger.info(
@@ -168,6 +198,7 @@ async def _rechunk_and_embed_contact(
                 db_chunks = []
                 for chunk in chunks:
                     db_chunk = ConversationChunk(
+                        user_id=user_id,
                         contact_id=contact_id,
                         chunk_text=chunk.text,
                         session_start=chunk.start,
@@ -179,9 +210,23 @@ async def _rechunk_and_embed_contact(
 
                 await db.flush()
 
+                # ── Pause guard (before embedding — the expensive API call) ──
+                if redis_client and await _is_user_paused(redis_client, user_id):
+                    logger.info(
+                        f"[CONSUMER] PAUSED mid-rechunk — chunks created but "
+                        f"embedding skipped for {contact.display_name} "
+                        f"(will re-process on resume)"
+                    )
+                    await db.rollback()
+                    return
+
                 # Embed all chunks
                 texts = [c.chunk_text for c in db_chunks]
                 if texts:
+                    logger.info(
+                        f"[CONSUMER] Embedding {len(texts)} chunks for "
+                        f"{contact.display_name}..."
+                    )
                     embeddings = await embed_texts(
                         texts,
                         input_type="document",
@@ -213,14 +258,22 @@ async def _auto_generate_suggestion(
     contact_id: uuid.UUID,
     contact_name: str,
     auto_draft: bool = True,
+    redis_client: aioredis.Redis | None = None,
 ):
     """Auto-generate a response suggestion for a new incoming message.
 
     Guards:
+    - Skips if user is globally paused
     - Skips if there's already a pending suggestion for this contact
     - Wraps in try/except so failures never crash the consumer
     """
     try:
+        # Pause guard — this task may have been queued before pause was set
+        if redis_client and await _is_user_paused(redis_client, user_id):
+            logger.info(
+                f"[CONSUMER] PAUSED — skipping auto-suggestion for {contact_name}"
+            )
+            return
         async with async_session() as db:
             # Check for existing pending suggestion
             stmt = select(ResponseSuggestion.id).where(
@@ -266,7 +319,7 @@ async def _auto_generate_suggestion(
                 # Auto-save as Telegram draft only if auto_draft is enabled
                 if auto_draft and contact:
                     await redis_client.publish(
-                        "telegram:send_commands",
+                        f"telegram:send_commands:{str(user_id)}",
                         json.dumps(
                             {
                                 "user_id": str(user_id),
@@ -308,8 +361,12 @@ async def _auto_generate_suggestion(
         )
 
 
-async def _process_message(msg_data: dict):
-    """Process a single incoming message from Redis."""
+async def _process_message(msg_data: dict, redis_client: aioredis.Redis):
+    """Process a single incoming message from Redis.
+
+    When the user is globally paused, messages are still saved to DB
+    (to prevent data loss) but heavy processing is skipped.
+    """
     user_id_str = msg_data.get("user_id")
     if not user_id_str:
         return
@@ -330,13 +387,42 @@ async def _process_message(msg_data: dict):
             from app.models.user import User
 
             if user_id_str == "default":
-                # Find the first user with a telegram session
-                stmt = select(User).where(User.telegram_session.isnot(None)).limit(1)
-                result = await db.execute(stmt)
-                user = result.scalar_one_or_none()
+                # Match by Telegram user ID (self_tg_id) from the message payload.
+                # This is deterministic even with multiple users in the DB.
+                self_tg_id = msg_data.get("self_tg_id")
+                if self_tg_id:
+                    stmt = select(User).where(
+                        User.telegram_user_id == str(self_tg_id)
+                    )
+                    result = await db.execute(stmt)
+                    user = result.scalar_one_or_none()
+                else:
+                    user = None
+
                 if not user:
-                    logger.warning("[CONSUMER] No user found for 'default' session")
-                    return
+                    # Fallback: only safe when exactly one user with a session exists
+                    count_stmt = select(func.count()).select_from(User).where(
+                        User.telegram_session.isnot(None)
+                    )
+                    user_count = (await db.execute(count_stmt)).scalar() or 0
+                    if user_count > 1:
+                        logger.error(
+                            "[CONSUMER] Refusing 'default' session: multiple users "
+                            "have telegram sessions. Cannot determine target user. "
+                            "Each user must authenticate via the dashboard."
+                        )
+                        return
+                    stmt = select(User).where(
+                        User.telegram_session.isnot(None)
+                    ).limit(1)
+                    result = await db.execute(stmt)
+                    user = result.scalar_one_or_none()
+                    if not user:
+                        logger.warning(
+                            "[CONSUMER] No user found for 'default' session"
+                        )
+                        return
+
                 user_id = user.id
             else:
                 try:
@@ -363,6 +449,19 @@ async def _process_message(msg_data: dict):
                     f"in {chat_name} (contact: {contact.id})"
                 )
 
+            # ── If user is globally paused, skip all heavy processing ──
+            paused = await _is_user_paused(redis_client, user_id)
+            if paused:
+                logger.info(
+                    f"[CONSUMER] PAUSED — message saved to DB but skipping "
+                    f"rechunk/embed/suggest for {chat_name} "
+                    f"(sync={is_sync}, user={user_id})"
+                )
+                # Still track pending rechunks so catch-up knows what to process
+                count = _pending_rechunk.get(contact.id, 0) + 1
+                _pending_rechunk[contact.id] = count
+                return
+
             # Auto-generate suggestion ONLY for real-time incoming DMs
             # Skip: bulk sync, groups, supergroups, channels, bots
             # Also skip if user has disabled auto_generate in preferences
@@ -374,9 +473,14 @@ async def _process_message(msg_data: dict):
                 auto_generate = user_prefs.get("auto_generate", True)
                 auto_draft = user_prefs.get("auto_draft", True)
                 if auto_generate:
+                    logger.info(
+                        f"[CONSUMER] Queuing auto-suggestion for {chat_name}"
+                    )
                     asyncio.create_task(
                         _auto_generate_suggestion(
-                            user_id, contact.id, chat_name, auto_draft=auto_draft
+                            user_id, contact.id, chat_name,
+                            auto_draft=auto_draft,
+                            redis_client=redis_client,
                         )
                     )
 
@@ -385,9 +489,12 @@ async def _process_message(msg_data: dict):
             _pending_rechunk[contact.id] = count
 
             if not is_sync and count >= RECHUNK_THRESHOLD:
-                # Fire-and-forget re-chunk task (during sync, periodic flush handles it)
+                logger.info(
+                    f"[CONSUMER] Threshold hit ({count}/{RECHUNK_THRESHOLD}) — "
+                    f"queuing rechunk for {chat_name}"
+                )
                 asyncio.create_task(
-                    _rechunk_and_embed_contact(user_id, contact.id)
+                    _rechunk_and_embed_contact(user_id, contact.id, redis_client)
                 )
 
         except Exception as e:
@@ -395,10 +502,11 @@ async def _process_message(msg_data: dict):
             await db.rollback()
 
 
-async def _periodic_rechunk():
+async def _periodic_rechunk(redis_client: aioredis.Redis):
     """
     Periodically flush any pending re-chunks that haven't hit the threshold.
     Runs every 60 seconds. Limits concurrency to avoid DB pool exhaustion.
+    Skips contacts whose user is globally paused.
     """
     while True:
         await asyncio.sleep(60)
@@ -413,34 +521,56 @@ async def _periodic_rechunk():
 
             # Process in batches of 3 to avoid DB pool exhaustion
             items = [(cid, cnt) for cid, cnt in pending.items() if cnt > 0]
+            skipped_paused = 0
+            queued = 0
             for i in range(0, len(items), 3):
                 batch = items[i : i + 3]
                 tasks = []
-                for contact_id, _ in batch:
+                for contact_id, count in batch:
                     async with async_session() as db:
                         contact = await db.get(Contact, contact_id)
                         if contact:
+                            # Skip if user is globally paused
+                            if await _is_user_paused(redis_client, contact.user_id):
+                                skipped_paused += 1
+                                logger.info(
+                                    f"[CONSUMER] PAUSED — skipping periodic rechunk "
+                                    f"for {contact.display_name} ({count} pending msgs)"
+                                )
+                                continue
                             tasks.append(
-                                _rechunk_and_embed_contact(contact.user_id, contact_id)
+                                _rechunk_and_embed_contact(
+                                    contact.user_id, contact_id, redis_client
+                                )
                             )
+                            queued += 1
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
+
+            if skipped_paused:
+                logger.info(
+                    f"[CONSUMER] Periodic flush done: {queued} processed, "
+                    f"{skipped_paused} skipped (user paused)"
+                )
         except Exception as e:
             logger.error(f"[CONSUMER] Periodic rechunk error: {e}", exc_info=True)
 
 
 async def _listen_user_name_updates():
-    """Listen for telegram:update_user_name events and persist to DB."""
+    """Listen for telegram:update_user_name:* events and persist to DB.
+
+    Uses pattern subscription so it auto-captures all per-user channels.
+    """
     from app.models.user import User
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe("telegram:update_user_name")
-    logger.info("[CONSUMER] Subscribed to telegram:update_user_name")
+    await pubsub.psubscribe("telegram:update_user_name:*")
+    logger.info("[CONSUMER] Subscribed to telegram:update_user_name:*")
 
     try:
         async for message in pubsub.listen():
-            if message["type"] != "message":
+            if message["type"] != "pmessage":
                 continue
             try:
                 data = json.loads(message["data"])
@@ -457,35 +587,116 @@ async def _listen_user_name_updates():
     except asyncio.CancelledError:
         pass
     finally:
-        await pubsub.unsubscribe()
+        await pubsub.punsubscribe()
         await pubsub.close()
         await redis_client.close()
 
 
+async def run_catchup_processing(
+    user_id: uuid.UUID,
+    paused_at: datetime,
+    redis_client: aioredis.Redis,
+):
+    """Catch-up processing after a pause/resume cycle.
+
+    Finds all contacts that received new messages since `paused_at`,
+    re-chunks and re-embeds them so nothing is missed.
+    """
+    logger.info(
+        f"[CONSUMER] Starting catch-up processing for user {user_id} "
+        f"from {paused_at.isoformat()}"
+    )
+
+    try:
+        async with async_session() as db:
+            # Find contacts that got new messages during the pause window
+            stmt = (
+                select(Contact)
+                .where(
+                    Contact.user_id == user_id,
+                    Contact.last_message_at >= paused_at,
+                )
+            )
+            result = await db.execute(stmt)
+            contacts = result.scalars().all()
+
+            if not contacts:
+                logger.info("[CONSUMER] Catch-up: no contacts with new messages")
+                return
+
+            logger.info(
+                f"[CONSUMER] Catch-up: {len(contacts)} contacts with messages "
+                f"since {paused_at.isoformat()}"
+            )
+
+            # Publish progress to frontend
+            await redis_client.publish(
+                f"user:{str(user_id)}:events",
+                json.dumps({
+                    "type": "processing_status",
+                    "message": f"Catching up — processing {len(contacts)} contacts...",
+                }),
+            )
+
+            # Rechunk + embed each contact (batched to avoid DB pool exhaustion)
+            processed = 0
+            for i in range(0, len(contacts), 3):
+                batch = contacts[i : i + 3]
+                tasks = [
+                    _rechunk_and_embed_contact(user_id, c.id, redis_client)
+                    for c in batch
+                ]
+                await asyncio.gather(*tasks, return_exceptions=True)
+                processed += len(batch)
+                logger.info(
+                    f"[CONSUMER] Catch-up progress: {processed}/{len(contacts)} contacts"
+                )
+
+            # Clear any stale pending rechunk counters for these contacts
+            for c in contacts:
+                _pending_rechunk.pop(c.id, None)
+
+            logger.info(
+                f"[CONSUMER] Catch-up complete: {processed} contacts re-chunked + embedded"
+            )
+
+            await redis_client.publish(
+                f"user:{str(user_id)}:events",
+                json.dumps({
+                    "type": "processing_status",
+                    "message": f"Catch-up complete — {processed} contacts processed.",
+                }),
+            )
+
+    except Exception as e:
+        logger.error(f"[CONSUMER] Catch-up failed: {e}", exc_info=True)
+
+
 async def start_message_consumer():
     """
-    Main consumer loop. Subscribes to telegram:new_messages and processes
-    each message. Also starts a periodic re-chunk flusher.
+    Main consumer loop. Uses pattern subscription on telegram:new_messages:*
+    to auto-capture messages from all per-user channels.
+    Also starts a periodic re-chunk flusher.
     """
     logger.info("[CONSUMER] Starting real-time message consumer...")
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe("telegram:new_messages")
+    await pubsub.psubscribe("telegram:new_messages:*")
 
-    # Start periodic flusher
-    asyncio.create_task(_periodic_rechunk())
+    # Start periodic flusher (with redis access for pause checks)
+    asyncio.create_task(_periodic_rechunk(redis_client))
     # Listen for user name updates from monitor
     asyncio.create_task(_listen_user_name_updates())
 
-    logger.info("[CONSUMER] Subscribed to telegram:new_messages")
+    logger.info("[CONSUMER] Subscribed to telegram:new_messages:*")
 
     try:
         async for message in pubsub.listen():
-            if message["type"] == "message":
+            if message["type"] == "pmessage":
                 try:
                     msg_data = json.loads(message["data"])
-                    await _process_message(msg_data)
+                    await _process_message(msg_data, redis_client)
                 except json.JSONDecodeError:
                     logger.warning("[CONSUMER] Invalid JSON in message")
                 except Exception as e:
@@ -493,7 +704,7 @@ async def start_message_consumer():
     except asyncio.CancelledError:
         logger.info("[CONSUMER] Shutting down...")
     finally:
-        await pubsub.unsubscribe()
+        await pubsub.punsubscribe()
         await pubsub.close()
         await redis_client.close()
         logger.info("[CONSUMER] Stopped")

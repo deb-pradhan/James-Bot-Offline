@@ -49,6 +49,8 @@ async def generate_reply(
     contact = await db.get(Contact, contact_id)
     if not contact:
         raise ValueError(f"Contact {contact_id} not found")
+    if contact.user_id != user_id:
+        raise ValueError(f"Contact {contact_id} does not belong to user {user_id}")
 
     # Fetch recent messages
     stmt = (

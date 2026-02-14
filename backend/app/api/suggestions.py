@@ -210,9 +210,9 @@ async def approve_suggestion(
 
     contact = await db.get(Contact, suggestion.contact_id)
 
-    # Publish to Telegram monitor via Redis
+    # Publish to user-scoped Telegram monitor channel via Redis
     await redis_client.publish(
-        "telegram:send_commands",
+        f"telegram:send_commands:{str(user.id)}",
         json.dumps(
             {
                 "user_id": str(user.id),
@@ -261,9 +261,9 @@ async def edit_and_send_suggestion(
     suggestion.suggested_response = req.text
     mode = req.mode
 
-    # Publish edited version to Telegram monitor
+    # Publish edited version to user-scoped Telegram monitor channel
     await redis_client.publish(
-        "telegram:send_commands",
+        f"telegram:send_commands:{str(user.id)}",
         json.dumps(
             {
                 "user_id": str(user.id),

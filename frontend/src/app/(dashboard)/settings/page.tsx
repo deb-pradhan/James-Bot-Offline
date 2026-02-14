@@ -9,7 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink, Brain, Zap, Sparkles, Crown, Power, Key, Eye, EyeOff, Trash2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Wifi, WifiOff, Loader2, CheckCircle2, ExternalLink, Brain, Zap, Sparkles, Crown, Power, Key, Eye, EyeOff, Trash2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
@@ -29,6 +37,10 @@ export default function SettingsPage() {
   const [customApiKey, setCustomApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [validatingKey, setValidatingKey] = useState(false);
+
+  // Delete data state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
   // Fetch current status
   const { data: tgStatus } = useQuery({
@@ -156,6 +168,26 @@ export default function SettingsPage() {
 
   const handleRemoveApiKey = () => {
     apiKeyMutation.mutate(null);
+  };
+
+  // Delete all data mutation
+  const deleteDataMutation = useMutation({
+    mutationFn: () => api.settings.deleteAllData({ confirm: true, keepAccount: true }),
+    onSuccess: () => {
+      // Invalidate all queries to refresh data
+      queryClient.invalidateQueries();
+      setShowDeleteDialog(false);
+      setDeleteConfirmText("");
+      toast.success("All your data has been deleted");
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || "Failed to delete data");
+    },
+  });
+
+  const handleDeleteAllData = () => {
+    if (deleteConfirmText !== "DELETE") return;
+    deleteDataMutation.mutate();
   };
 
   const tierIcon = (tier: string) => {
@@ -553,6 +585,112 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Danger Zone - Delete Data */}
+      <Card className="border-signal-error/30">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-sm text-signal-error">
+                <AlertTriangle className="h-4 w-4" strokeWidth={1.5} />
+                Danger Zone
+              </CardTitle>
+              <CardDescription>
+                Permanently delete all your data
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="p-4 border border-signal-error/20 bg-signal-error/5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm text-ink-primary font-medium">Delete All Data</p>
+                <p className="text-xs text-ink-tertiary mt-1">
+                  Permanently delete all your contacts, messages, documents, suggestions,
+                  and disconnect your Telegram account. This action cannot be undone.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowDeleteDialog(true)}
+                className="shrink-0 border-signal-error/50 text-signal-error hover:bg-signal-error/10 hover:text-signal-error"
+              >
+                <Trash2 className="h-4 w-4 mr-1" strokeWidth={1.5} />
+                Delete All Data
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-signal-error">
+              <AlertTriangle className="h-5 w-5" strokeWidth={1.5} />
+              Delete All Data
+            </DialogTitle>
+            <DialogDescription>
+              This will permanently delete all your data including:
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <ul className="text-sm text-ink-secondary space-y-1.5 list-disc list-inside">
+              <li>All contacts and their messages</li>
+              <li>All conversation history and embeddings</li>
+              <li>All uploaded documents</li>
+              <li>All AI suggestions</li>
+              <li>Your Telegram connection</li>
+              <li>All settings and preferences</li>
+            </ul>
+            <div className="p-3 border border-signal-warning/30 bg-signal-warning/5 text-sm">
+              <p className="text-signal-warning font-medium">This action cannot be undone.</p>
+              <p className="text-ink-tertiary text-xs mt-1">
+                Your account will remain active, but all data will be permanently deleted.
+              </p>
+            </div>
+            <div className="pt-2">
+              <label className="text-sm text-ink-secondary">
+                Type <span className="font-mono font-bold">DELETE</span> to confirm:
+              </label>
+              <Input
+                className="mt-2"
+                placeholder="Type DELETE"
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                disabled={deleteDataMutation.isPending}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowDeleteDialog(false);
+                setDeleteConfirmText("");
+              }}
+              disabled={deleteDataMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteAllData}
+              disabled={deleteConfirmText !== "DELETE" || deleteDataMutation.isPending}
+            >
+              {deleteDataMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
+              ) : (
+                <Trash2 className="mr-2 h-4 w-4" strokeWidth={1.5} />
+              )}
+              Delete All Data
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

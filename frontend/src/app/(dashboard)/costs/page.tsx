@@ -273,60 +273,97 @@ export default function CostsPage() {
             <TrendingUp className="h-4 w-4 text-primary" strokeWidth={1.5} />
             Daily Costs (Last 30 Days)
           </CardTitle>
+          {!isLoading && costs && costs.daily_costs.length > 0 && (
+            <p className="text-xs text-ink-tertiary font-mono">
+              Peak: {formatCost(maxDailyCost)} / day
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <Skeleton className="h-48 w-full" />
+            <Skeleton className="h-56 w-full" />
           ) : (costs?.daily_costs ?? []).length === 0 ? (
             <p className="py-12 text-center text-sm text-ink-tertiary">
               No usage recorded yet
             </p>
-          ) : (
-            <div className="overflow-x-auto">
-            <div className="flex h-48 items-end gap-px" style={{ minWidth: "20rem" }}>
-              {costs!.daily_costs.map((day) => {
-                const heightPct = (day.cost_usd / maxDailyCost) * 100;
-                const dateLabel = day.date.slice(5); // MM-DD
-                return (
-                  <div
-                    key={day.date}
-                    className="group relative flex flex-1 flex-col items-center"
-                  >
-                    {/* Tooltip */}
-                    <div className="pointer-events-none absolute -top-14 z-10 hidden whitespace-nowrap border border-border-grid bg-surface-card px-2 py-1 text-xs group-hover:block">
-                      <p className="text-ink-primary font-mono">{day.date}</p>
-                      <p className="font-mono">{formatCost(day.cost_usd)}</p>
-                      <p className="text-ink-tertiary">
-                        {day.api_calls} calls
-                      </p>
-                    </div>
-                    {/* Bar */}
-                    <div className="w-full flex-1 flex items-end">
-                      <div
-                        className="w-full bg-primary/60 transition-all hover:bg-primary"
-                        style={{
-                          height: `${Math.max(heightPct, 2)}%`,
-                          minHeight: "2px",
-                        }}
-                      />
-                    </div>
-                    {/* Date label (show every nth) */}
-                    {costs!.daily_costs.indexOf(day) %
-                      Math.max(
-                        1,
-                        Math.floor(costs!.daily_costs.length / 6)
-                      ) ===
-                      0 && (
-                      <span className="mt-1 text-[10px] text-ink-tertiary font-mono">
-                        {dateLabel}
+          ) : (() => {
+            const labelStep = Math.max(1, Math.floor(costs!.daily_costs.length / 6));
+            return (
+              <div className="overflow-x-auto">
+                <div style={{ minWidth: "20rem" }}>
+                  {/* Y-axis + Bars */}
+                  <div className="flex">
+                    {/* Y-axis labels */}
+                    <div className="flex h-48 w-10 shrink-0 flex-col justify-between pr-2 text-right">
+                      <span className="text-[10px] text-ink-tertiary font-mono leading-none">
+                        {formatCost(maxDailyCost)}
                       </span>
-                    )}
+                      <span className="text-[10px] text-ink-tertiary font-mono leading-none">
+                        {formatCost(maxDailyCost / 2)}
+                      </span>
+                      <span className="text-[10px] text-ink-tertiary font-mono leading-none">
+                        $0
+                      </span>
+                    </div>
+                    {/* Chart area */}
+                    <div className="relative flex-1">
+                      {/* Grid lines */}
+                      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between">
+                        <div className="border-t border-border-grid/50" />
+                        <div className="border-t border-dashed border-border-grid/30" />
+                        <div className="border-t border-border-grid/50" />
+                      </div>
+                      {/* Bars */}
+                      <div className="relative flex h-48 items-end gap-px">
+                        {costs!.daily_costs.map((day, idx) => {
+                          const heightPct = (day.cost_usd / maxDailyCost) * 100;
+                          return (
+                            <div
+                              key={day.date}
+                              className="group relative flex-1"
+                              style={{ height: "100%" }}
+                            >
+                              {/* Tooltip */}
+                              <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden -translate-x-1/2 whitespace-nowrap rounded border border-border-grid bg-surface-card px-2.5 py-1.5 text-xs shadow-sm group-hover:block">
+                                <p className="text-ink-primary font-mono font-medium">{day.date}</p>
+                                <p className="font-mono text-primary">{formatCost(day.cost_usd)}</p>
+                                <p className="text-ink-tertiary">{day.api_calls} calls</p>
+                                <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-border-grid" />
+                              </div>
+                              {/* Bar (anchored to bottom) */}
+                              <div className="absolute inset-x-0 bottom-0">
+                                <div
+                                  className="w-full bg-primary/60 transition-all duration-150 hover:bg-primary"
+                                  style={{
+                                    height: day.cost_usd > 0
+                                      ? `${Math.max(heightPct, 1)}%`
+                                      : "0px",
+                                    minHeight: day.cost_usd > 0 ? "2px" : "0px",
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
-                );
-              })}
-            </div>
-            </div>
-          )}
+                  {/* X-axis date labels — separate row, not inside chart height */}
+                  <div className="flex pl-10">
+                    {costs!.daily_costs.map((day, idx) => (
+                      <div key={day.date} className="flex-1 text-center">
+                        {idx % labelStep === 0 && (
+                          <span className="mt-1.5 block text-[10px] text-ink-tertiary font-mono">
+                            {day.date.slice(5)}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
     </div>

@@ -70,7 +70,7 @@ interface HistoryItem {
   ingested_at: string;
 }
 
-type PageStatus = "idle" | "uploading" | "processing" | "paused" | "stopping" | "complete" | "error";
+type PageStatus = "idle" | "uploading" | "processing" | "paused" | "stopping" | "complete" | "error" | "globally_paused";
 
 const EMPTY_STATS: IngestionStats = {
   contacts_processed: 0,
@@ -97,6 +97,7 @@ export default function IngestPage() {
   const noActiveJobToastRef = useRef(false);
   const isStopping = status === "stopping";
   const isPaused = status === "paused";
+  const isGloballyPaused = status === "globally_paused";
   const isActive = status === "processing" || status === "paused" || status === "stopping";
 
   const fetchHistory = useCallback(async () => {
@@ -128,9 +129,17 @@ export default function IngestPage() {
           progress: job.progress ?? undefined,
           total: job.total ?? undefined,
         });
+      } else if (job.status === "globally_paused") {
+        // No active ingestion but background processing is paused
+        setStatus("globally_paused");
       } else if (job.status === "complete") {
-        setStatus("complete");
-        setResult(job.result ?? null);
+        // If globally paused after a stop, show the paused state instead
+        if (job.globally_paused) {
+          setStatus("globally_paused");
+        } else {
+          setStatus("complete");
+          setResult(job.result ?? null);
+        }
       } else if (job.status === "failed") {
         setStatus("error");
         setErrorMessage(job.message ?? "Ingestion failed");
@@ -216,8 +225,16 @@ export default function IngestPage() {
     }
 
     if (lastEvent.type === "ingestion_complete" && isActive) {
-      setStatus("complete");
-      setResult(lastEvent.data as Record<string, number>);
+      const completionData = lastEvent.data as Record<string, number>;
+      // If the ingestion was stopped (cancelled), transition to globally_paused
+      // so the user sees a Resume button to restart background processing
+      if (completionData?.stopped) {
+        setStatus("globally_paused");
+        setResult(completionData);
+      } else {
+        setStatus("complete");
+        setResult(completionData);
+      }
       setCurrentStep(null);
       fetchHistory();
     }
@@ -231,7 +248,7 @@ export default function IngestPage() {
 
   // Poll active ingestion status as a fallback when WS events are missed
   useEffect(() => {
-    if (!isActive) {
+    if (!isActive && !isGloballyPaused) {
       noActiveJobToastRef.current = false;
       return;
     }
@@ -247,16 +264,24 @@ export default function IngestPage() {
           setStatus("idle");
           setCurrentStep(null);
           setLiveStats(EMPTY_STATS);
-          if (!noActiveJobToastRef.current) {
+          if (!noActiveJobToastRef.current && isActive) {
             toast.warning("No active ingestion job found. Processing view reset.");
             noActiveJobToastRef.current = true;
           }
           return;
         }
 
+        // Handle globally_paused (no active ingestion, but processing is paused)
+        if (job.status === "globally_paused" || (job.globally_paused && !["processing", "paused"].includes(job.status))) {
+          noActiveJobToastRef.current = false;
+          setStatus("globally_paused");
+          setCurrentStep(null);
+          return;
+        }
+
         if (job.status === "processing") {
           noActiveJobToastRef.current = false;
-          setStatus((prev) => (prev === "stopping" ? prev : "processing"));
+          setStatus((prev) => (prev === "stopping" || prev === "paused" ? prev : "processing"));
           setCurrentStep({
             step: job.step ?? "parsing",
             label: job.message ?? "Processing...",
@@ -280,8 +305,14 @@ export default function IngestPage() {
 
         if (job.status === "complete") {
           noActiveJobToastRef.current = false;
-          setStatus("complete");
-          setResult(job.result ?? null);
+          // If globally paused after a stop, stay in globally_paused
+          if (job.globally_paused) {
+            setStatus("globally_paused");
+            setResult(job.result ?? null);
+          } else {
+            setStatus("complete");
+            setResult(job.result ?? null);
+          }
           setCurrentStep(null);
           fetchHistory();
           return;
@@ -305,7 +336,7 @@ export default function IngestPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isActive, fetchHistory]);
+  }, [isActive, isGloballyPaused, fetchHistory]);
 
   const handleFileUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -343,9 +374,9 @@ export default function IngestPage() {
     try {
       await api.ingest.pause();
       setStatus("paused");
-      toast.success("Pausing — will pause after current item finishes.");
+      toast.success("Pausing all processing — syncing, chunking, embeddings, suggestions.");
     } catch {
-      toast.error("Failed to pause ingestion");
+      toast.error("Failed to pause");
     }
   }, []);
 
@@ -353,9 +384,21 @@ export default function IngestPage() {
     try {
       await api.ingest.resume();
       setStatus("processing");
-      toast.success("Resuming ingestion...");
+      toast.success("Resuming — catching up on data received while paused.");
     } catch {
-      toast.error("Failed to resume ingestion");
+      toast.error("Failed to resume");
+    }
+  }, []);
+
+  const handleResumeFromGlobalPause = useCallback(async () => {
+    try {
+      await api.ingest.resume();
+      setStatus("idle");
+      setLiveStats(EMPTY_STATS);
+      setCurrentStep(null);
+      toast.success("Background processing resumed. Catching up on missed data.");
+    } catch {
+      toast.error("Failed to resume processing");
     }
   }, []);
 
@@ -363,9 +406,9 @@ export default function IngestPage() {
     try {
       await api.ingest.stop();
       setStatus("stopping");
-      toast.success("Stopping ingestion — this can take a few seconds.");
+      toast.success("Stopping ingestion and pausing all background processing.");
     } catch {
-      toast.error("Failed to stop ingestion");
+      toast.error("Failed to stop");
     }
   }, []);
 
@@ -408,7 +451,25 @@ export default function IngestPage() {
       {/* Upload Zone */}
       <Card>
         <CardContent className="py-8">
-          {status === "idle" || status === "error" ? (
+          {isGloballyPaused ? (
+            <div className="flex flex-col items-center py-12 space-y-4">
+              <Pause className="mb-2 h-16 w-16 text-signal-warning" strokeWidth={1.5} />
+              <p className="text-sm text-ink-primary font-medium">
+                All background processing is paused
+              </p>
+              <p className="text-xs text-ink-tertiary text-center max-w-sm">
+                Message syncing, chunking, embeddings, and auto-suggestions are stopped.
+                Messages received during the pause will be caught up on resume.
+              </p>
+              <Button
+                variant="default"
+                onClick={handleResumeFromGlobalPause}
+              >
+                <Play className="mr-2 h-4 w-4" strokeWidth={1.5} />
+                Resume Processing
+              </Button>
+            </div>
+          ) : status === "idle" || status === "error" ? (
             <label className="flex cursor-pointer flex-col items-center border-2 border-dashed border-border-grid p-6 sm:p-12 transition-colors hover:border-primary/50 hover:bg-surface-subtle/50">
               <Upload className="mb-4 h-16 w-16 text-ink-tertiary/40" strokeWidth={1.5} />
               <p className="text-sm text-ink-primary">
@@ -455,7 +516,7 @@ export default function IngestPage() {
                 ) : (
                   <>
                     <Loader2 className="mx-auto mb-4 h-12 w-12 animate-spin text-primary" strokeWidth={1.5} />
-                    <p className="text-sm text-ink-primary">Processing your chat history</p>
+                    <p className="text-sm text-ink-primary">Syncing and processing</p>
                   </>
                 )}
               </div>

@@ -148,12 +148,20 @@ async def upload_telegram_export(
 @router.get("/active", response_model=IngestStatusResponse | None)
 async def get_active_job(
     db: AsyncSession = Depends(get_db),
+    redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
     """
     Return the most recent active (processing) job for the current user.
     If no processing job, return the last completed/failed job within 60s.
+    Also returns global pause state so the frontend can show a Resume button.
     """
+    user_id_str = str(user.id)
+
+    # Check global pause state
+    paused_at_str = await redis_client.get(f"user:paused:{user_id_str}")
+    globally_paused = paused_at_str is not None
+
     # First check for processing or paused jobs
     stmt = (
         select(IngestionJob)
@@ -183,17 +191,36 @@ async def get_active_job(
         result = await db.execute(stmt)
         job = result.scalar_one_or_none()
 
-    if not job:
+    if not job and not globally_paused:
         return None
+
+    # If globally paused but no active/recent job, return a synthetic status
+    if not job:
+        return IngestStatusResponse(
+            job_id="none",
+            status="globally_paused",
+            message="All processing is paused.",
+            globally_paused=True,
+            paused_at=paused_at_str,
+        )
+
+    # If globally paused but the DB still says "processing" (pipeline hasn't
+    # reached a checkpoint yet), report "paused" to the frontend so the UI
+    # doesn't flicker back to "processing" during the poll window.
+    effective_status = job.status
+    if globally_paused and job.status == "processing":
+        effective_status = "paused"
 
     return IngestStatusResponse(
         job_id=str(job.id),
-        status=job.status,
+        status=effective_status,
         step=job.step,
         progress=job.progress,
         total=job.total,
         message=job.message,
         result=job.result,
+        globally_paused=globally_paused,
+        paused_at=paused_at_str,
     )
 
 
@@ -202,11 +229,17 @@ async def pause_ingestion(
     redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
-    """Pause the running ingestion job. The pipeline will block at the next check-point."""
-    pause_key = f"ingest:pause_job:{str(user.id)}"
-    await redis_client.set(pause_key, "1", ex=1800)  # auto-expire after 30min
-    logger.info(f"[INGEST] Ingestion pause requested by {user.email}")
-    return {"status": "ok", "message": "Pause signal sent. Ingestion will pause shortly."}
+    """Pause ALL processing for this user: ingestion pipeline, message consumer,
+    chunking, embedding, and auto-suggestions."""
+    user_id_str = str(user.id)
+    paused_at = datetime.utcnow().isoformat()
+
+    # Global pause flag — checked by ingestion pipeline, message consumer,
+    # monitor handlers, sync, and periodic rechunker. Single source of truth.
+    await redis_client.set(f"user:paused:{user_id_str}", paused_at)
+
+    logger.info(f"[INGEST] Global pause requested by {user.email} at {paused_at}")
+    return {"status": "ok", "message": "All processing paused."}
 
 
 @router.post("/resume")
@@ -214,11 +247,33 @@ async def resume_ingestion(
     redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
-    """Resume a paused ingestion job."""
-    pause_key = f"ingest:pause_job:{str(user.id)}"
-    await redis_client.delete(pause_key)
-    logger.info(f"[INGEST] Ingestion resume requested by {user.email}")
-    return {"status": "ok", "message": "Resume signal sent. Ingestion will continue."}
+    """Resume ALL processing: ingestion pipeline + background message processing.
+    Triggers catch-up for messages that arrived during the pause window."""
+    import asyncio
+    from app.services.message_consumer import run_catchup_processing
+
+    user_id_str = str(user.id)
+
+    # Read the pause timestamp before clearing
+    paused_at_str = await redis_client.get(f"user:paused:{user_id_str}")
+
+    # Clear global pause (single key used by all services)
+    await redis_client.delete(f"user:paused:{user_id_str}")
+
+    # Trigger catch-up: rechunk + embed contacts that got new messages while paused
+    if paused_at_str:
+        paused_at = datetime.fromisoformat(paused_at_str)
+        asyncio.create_task(
+            run_catchup_processing(user.id, paused_at, redis_client)
+        )
+        logger.info(
+            f"[INGEST] Global resume + catch-up from {paused_at_str} "
+            f"requested by {user.email}"
+        )
+    else:
+        logger.info(f"[INGEST] Resume requested by {user.email} (no pause timestamp found)")
+
+    return {"status": "ok", "message": "Processing resumed. Catching up on queued data."}
 
 
 @router.post("/stop-analysis")
@@ -238,13 +293,21 @@ async def stop_ingestion(
     redis_client: aioredis.Redis = Depends(get_redis),
     user: User = Depends(get_current_user),
 ):
-    """Signal the running ingestion job to stop as soon as possible."""
-    cancel_key = f"ingest:cancel_job:{str(user.id)}"
-    await redis_client.set(cancel_key, "1", ex=600)  # auto-expire after 10min
-    logger.info(f"[INGEST] Full ingestion stop requested by {user.email}")
+    """Stop ingestion AND pause all background processing.
+    The user must call /resume to restart background processing and trigger catch-up."""
+    user_id_str = str(user.id)
+    paused_at = datetime.utcnow().isoformat()
+
+    # Global pause — background processing stops until explicit resume
+    await redis_client.set(f"user:paused:{user_id_str}", paused_at)
+
+    # Cancel the running ingestion pipeline
+    await redis_client.set(f"ingest:cancel_job:{user_id_str}", "1", ex=600)
+
+    logger.info(f"[INGEST] Full stop + global pause requested by {user.email}")
     return {
         "status": "ok",
-        "message": "Stop signal sent. Ingestion will stop shortly.",
+        "message": "Stopping ingestion and pausing all processing.",
     }
 
 
@@ -410,6 +473,7 @@ async def upload_document(
     for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
         db.add(
             DocumentChunk(
+                user_id=user.id,
                 document_id=doc.id,
                 chunk_text=chunk_text,
                 embedding=embedding,
@@ -467,6 +531,7 @@ async def ingest_url(
     for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
         db.add(
             DocumentChunk(
+                user_id=user.id,
                 document_id=doc.id,
                 chunk_text=chunk_text,
                 embedding=embedding,

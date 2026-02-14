@@ -34,7 +34,12 @@ async def analyze_contact_style(
     """
     logger.info(f"[STYLE] Analyzing style for contact: {contact.display_name}")
 
-    # Fetch James's messages to this contact (sender_type = "self")
+    if contact.user_id != user_id:
+        raise ValueError(
+            f"Contact {contact.id} does not belong to user {user_id}"
+        )
+
+    # Fetch user's messages to this contact (sender_type = "self")
     stmt = (
         select(Message)
         .where(

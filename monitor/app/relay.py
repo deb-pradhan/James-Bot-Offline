@@ -32,9 +32,9 @@ class RedisRelay:
         logger.info("[RELAY] Redis connection closed")
 
     async def publish_new_message(self, user_id: str, message_data: dict):
-        """Publish a new incoming Telegram message."""
+        """Publish a new incoming Telegram message to user-scoped channel."""
         payload = json.dumps({"user_id": user_id, **message_data})
-        await self.redis.publish("telegram:new_messages", payload)
+        await self.redis.publish(f"telegram:new_messages:{user_id}", payload)
 
         # Also publish to user's event channel for WebSocket
         event = {
@@ -52,12 +52,16 @@ class RedisRelay:
         thousands of new_message events.
         """
         payload = json.dumps({"user_id": user_id, **message_data})
-        await self.redis.publish("telegram:new_messages", payload)
+        await self.redis.publish(f"telegram:new_messages:{user_id}", payload)
 
     async def publish_status(self, user_id: str, event_type: str, data: dict):
         """Publish Telegram connection status."""
         payload = json.dumps({"type": event_type, "data": data})
         await self.redis.publish(f"user:{user_id}:events", payload)
+
+    async def is_user_paused(self, user_id: str) -> bool:
+        """Check if a user has global processing paused."""
+        return await self.redis.exists(f"user:paused:{user_id}") > 0
 
     async def set_connected(self, user_id: str, connected: bool):
         """Set Telegram connection flag in Redis."""
@@ -73,9 +77,9 @@ class RedisRelay:
             return json.loads(data)
         return None
 
-    async def subscribe_send_commands(self):
-        """Subscribe to send command channel and yield messages."""
-        await self.pubsub.subscribe("telegram:send_commands")
+    async def subscribe_send_commands(self, user_id: str):
+        """Subscribe to user-scoped send command channel and yield messages."""
+        await self.pubsub.subscribe(f"telegram:send_commands:{user_id}")
         async for message in self.pubsub.listen():
             if message["type"] == "message":
                 yield message["data"]

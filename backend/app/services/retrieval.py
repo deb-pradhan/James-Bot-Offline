@@ -55,7 +55,7 @@ async def retrieve_relevant_chunks(
                    1 - (cc.embedding <=> CAST(:embedding AS vector)) AS score
             FROM conversation_chunks cc
             JOIN contacts c ON cc.contact_id = c.id
-            WHERE c.user_id = :user_id
+            WHERE cc.user_id = :user_id
               AND cc.contact_id = :contact_id
               AND cc.embedding IS NOT NULL
             ORDER BY cc.embedding <=> CAST(:embedding AS vector)
@@ -78,7 +78,7 @@ async def retrieve_relevant_chunks(
                    1 - (cc.embedding <=> CAST(:embedding AS vector)) AS score
             FROM conversation_chunks cc
             JOIN contacts c ON cc.contact_id = c.id
-            WHERE c.user_id = :user_id
+            WHERE cc.user_id = :user_id
               AND cc.embedding IS NOT NULL
             ORDER BY cc.embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
@@ -120,7 +120,7 @@ async def retrieve_relevant_chunks(
                        1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score
                 FROM document_chunks dc
                 JOIN documents d ON dc.document_id = d.id
-                WHERE d.user_id = :user_id
+                WHERE dc.user_id = :user_id
                   AND (d.contact_id = :contact_id OR d.scope = 'general')
                   AND dc.embedding IS NOT NULL
                 ORDER BY dc.embedding <=> CAST(:embedding AS vector)
@@ -141,7 +141,7 @@ async def retrieve_relevant_chunks(
                        1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score
                 FROM document_chunks dc
                 JOIN documents d ON dc.document_id = d.id
-                WHERE d.user_id = :user_id
+                WHERE dc.user_id = :user_id
                   AND dc.embedding IS NOT NULL
                 ORDER BY dc.embedding <=> CAST(:embedding AS vector)
                 LIMIT :top_k

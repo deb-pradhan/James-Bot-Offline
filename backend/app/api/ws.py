@@ -67,9 +67,6 @@ async def websocket_endpoint(websocket: WebSocket):
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(f"user:{user_id}:events")
 
-        # Also subscribe to global telegram status
-        await pubsub.subscribe("telegram:status")
-
         # Forward events from Redis to WebSocket
         async def forward_events():
             async for message in pubsub.listen():

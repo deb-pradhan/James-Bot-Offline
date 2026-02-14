@@ -47,3 +47,9 @@ class User(Base):
     suggestions: Mapped[list["ResponseSuggestion"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    ingestion_jobs: Mapped[list["IngestionJob"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    api_usage: Mapped[list["ApiUsage"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )

@@ -237,3 +237,134 @@ async def get_ai_status(
         "has_custom_api_key": has_custom_key,
         "using_custom_key": has_custom_key,
     }
+
+
+class DeleteDataRequest(BaseModel):
+    confirm: bool
+    keep_account: bool = True  # If False, also deletes the user account
+
+
+@router.delete("/delete-all-data")
+async def delete_all_user_data(
+    req: DeleteDataRequest,
+    db: AsyncSession = Depends(get_db),
+    redis_client=Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """
+    Delete all user data including contacts, messages, documents, suggestions,
+    ingestion jobs, API usage, and Redis keys. Optionally keeps the account.
+    """
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="Confirmation required")
+
+    user_id_str = str(user.id)
+    user_email = user.email  # Cache before any DB ops that might expire the object
+    logger.info(f"[SETTINGS] Deleting all data for user {user_email}")
+
+    try:
+        from app.models.contact import Contact
+        from app.models.message import Message
+        from app.models.chunk import ConversationChunk, DocumentChunk
+        from app.models.document import Document
+        from app.models.suggestion import ResponseSuggestion
+        from app.models.job import IngestionJob
+        from app.models.api_usage import ApiUsage
+        from sqlalchemy import delete, select
+
+        # Bulk delete() bypasses ORM cascade, so we must delete in correct FK order:
+        # Delete children before parents
+
+        # 1. Get all contact IDs for this user (needed for child table deletes)
+        contact_ids_result = await db.execute(
+            select(Contact.id).where(Contact.user_id == user.id)
+        )
+        contact_ids = [row[0] for row in contact_ids_result.fetchall()]
+
+        # 2. Get all document IDs for this user
+        doc_ids_result = await db.execute(
+            select(Document.id).where(Document.user_id == user.id)
+        )
+        doc_ids = [row[0] for row in doc_ids_result.fetchall()]
+
+        # 3. Delete leaf tables (children) first
+        if contact_ids:
+            # Messages (child of Contact)
+            await db.execute(
+                delete(Message).where(Message.contact_id.in_(contact_ids))
+            )
+            # ConversationChunks (child of Contact)
+            await db.execute(
+                delete(ConversationChunk).where(ConversationChunk.contact_id.in_(contact_ids))
+            )
+            # Suggestions via contact (child of Contact)
+            await db.execute(
+                delete(ResponseSuggestion).where(ResponseSuggestion.contact_id.in_(contact_ids))
+            )
+
+        if doc_ids:
+            # DocumentChunks (child of Document)
+            await db.execute(
+                delete(DocumentChunk).where(DocumentChunk.document_id.in_(doc_ids))
+            )
+
+        # 4. Delete parent tables
+        await db.execute(delete(Contact).where(Contact.user_id == user.id))
+        await db.execute(delete(Document).where(Document.user_id == user.id))
+
+        # 5. Delete remaining user-owned records (no FK children)
+        await db.execute(delete(ResponseSuggestion).where(ResponseSuggestion.user_id == user.id))
+        await db.execute(delete(IngestionJob).where(IngestionJob.user_id == user.id))
+        await db.execute(delete(ApiUsage).where(ApiUsage.user_id == user.id))
+
+        # 6. Clean up Redis keys for this user
+        redis_keys_to_delete = [
+            f"telegram:session:{user_id_str}",
+            f"telegram:connected:{user_id_str}",
+            f"user:paused:{user_id_str}",
+            f"user:paused_at:{user_id_str}",
+        ]
+        for key in redis_keys_to_delete:
+            await redis_client.delete(key)
+
+        # 7. Clear Telegram credentials from user (disconnect)
+        user.telegram_session = None
+        user.telegram_user_id = None
+        user.telegram_api_id = None
+        user.telegram_api_hash = None
+
+        # 8. Reset user settings to defaults
+        user.settings = {}
+
+        if not req.keep_account:
+            # Delete the user account entirely
+            await db.delete(user)
+            await db.commit()
+            logger.info(f"[SETTINGS] Deleted account and all data for {user_email}")
+            return {
+                "status": "deleted",
+                "message": "Account and all data have been permanently deleted",
+            }
+
+        await db.commit()
+
+        # Notify connected clients that data was cleared
+        import json
+        await redis_client.publish(
+            f"user:{user_id_str}:events",
+            json.dumps({
+                "type": "data_deleted",
+                "message": "All your data has been deleted",
+            }),
+        )
+
+        logger.info(f"[SETTINGS] Deleted all data for {user_email}, account retained")
+        return {
+            "status": "deleted",
+            "message": "All data has been permanently deleted. Your account remains active.",
+        }
+
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"[SETTINGS] Failed to delete data for {user_email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete data: {str(e)}")

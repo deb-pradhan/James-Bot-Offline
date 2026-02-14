@@ -40,6 +40,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/app:/app/app  # Hot reload
+      - ./backend/alembic:/app/alembic  # Hot reload migrations
 
   monitor:
     build: ./monitor

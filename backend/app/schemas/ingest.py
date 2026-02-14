@@ -18,6 +18,8 @@ class IngestStatusResponse(BaseModel):
     message: str | None = None
     result: dict | None = None
     stats: dict | None = None
+    globally_paused: bool = False
+    paused_at: str | None = None
 
 
 class UrlIngestRequest(BaseModel):

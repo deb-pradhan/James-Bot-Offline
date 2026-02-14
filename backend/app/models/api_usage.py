@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import String, DateTime, Integer, Float, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
@@ -32,6 +32,8 @@ class ApiUsage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow
     )
+
+    user: Mapped["User"] = relationship(back_populates="api_usage")
 
     __table_args__ = (
         Index("ix_api_usage_user_created", "user_id", "created_at"),
