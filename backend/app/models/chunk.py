@@ -6,7 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 from app.database import Base
 
-# Voyage AI voyage-3-lite dimension
+# Embedding vector dimension used across providers/models
 EMBEDDING_DIM = 512
 
 

@@ -69,7 +69,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Forward events from Redis to WebSocket
         async def forward_events():
-            async for message in pubsub.listen():
+            while True:
+                # Use get_message with timeout to allow clean cancellation
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is None:
+                    await asyncio.sleep(0.1)
+                    continue
                 if message["type"] == "message":
                     try:
                         await websocket.send_text(message["data"])

@@ -284,6 +284,7 @@ export const api = {
           id: string;
           name: string;
           description: string;
+          provider: "anthropic" | "openai";
           tier: string;
           input_cost_per_m: number;
           output_cost_per_m: number;
@@ -291,16 +292,19 @@ export const api = {
         current: string;
         default: string;
       }>("/api/settings/available-models"),
-    validateApiKey: (apiKey: string) =>
+    validateApiKey: (apiKey: string, provider: "anthropic" | "openai" = "anthropic") =>
       request<{ valid: boolean; message: string }>("/api/settings/validate-api-key", {
         method: "POST",
-        body: JSON.stringify({ api_key: apiKey }),
+        body: JSON.stringify({ api_key: apiKey, provider }),
       }),
     getAiStatus: () =>
       request<{
         ai_enabled: boolean;
         has_custom_api_key: boolean;
-        using_custom_key: boolean;
+        has_anthropic_api_key: boolean;
+        has_openai_api_key: boolean;
+        can_use_embeddings: boolean;
+        active_llm_provider: "anthropic" | "openai" | null;
       }>("/api/settings/ai-status"),
     deleteAllData: (options: { confirm: boolean; keepAccount?: boolean }) =>
       request<{ status: string; message: string }>("/api/settings/delete-all-data", {

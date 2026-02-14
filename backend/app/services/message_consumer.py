@@ -167,6 +167,16 @@ async def _rechunk_and_embed_contact(
                         f"belongs to {contact.user_id}, not {user_id}"
                     )
                     return
+                from app.models.user import User
+                from app.api.deps import get_user_settings
+
+                user = await db.get(User, user_id)
+                if not user:
+                    logger.warning(
+                        f"[CONSUMER] User not found while re-chunking contact {contact_id}"
+                    )
+                    return
+                user_settings = get_user_settings(user)
 
                 logger.info(
                     f"[CONSUMER] Re-chunking contact {contact.display_name} "
@@ -232,6 +242,7 @@ async def _rechunk_and_embed_contact(
                         input_type="document",
                         user_id=user_id,
                         operation="live_message_embed",
+                        user_settings=user_settings,
                     )
                     for db_chunk, emb in zip(db_chunks, embeddings):
                         db_chunk.embedding = emb
@@ -508,58 +519,64 @@ async def _periodic_rechunk(redis_client: aioredis.Redis):
     Runs every 60 seconds. Limits concurrency to avoid DB pool exhaustion.
     Skips contacts whose user is globally paused.
     """
-    while True:
-        await asyncio.sleep(60)
-        try:
-            pending = dict(_pending_rechunk)
-            if not pending:
-                continue
+    try:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                pending = dict(_pending_rechunk)
+                if not pending:
+                    continue
 
-            logger.info(
-                f"[CONSUMER] Periodic flush: {len(pending)} contacts with pending messages"
-            )
-
-            # Process in batches of 3 to avoid DB pool exhaustion
-            items = [(cid, cnt) for cid, cnt in pending.items() if cnt > 0]
-            skipped_paused = 0
-            queued = 0
-            for i in range(0, len(items), 3):
-                batch = items[i : i + 3]
-                tasks = []
-                for contact_id, count in batch:
-                    async with async_session() as db:
-                        contact = await db.get(Contact, contact_id)
-                        if contact:
-                            # Skip if user is globally paused
-                            if await _is_user_paused(redis_client, contact.user_id):
-                                skipped_paused += 1
-                                logger.info(
-                                    f"[CONSUMER] PAUSED — skipping periodic rechunk "
-                                    f"for {contact.display_name} ({count} pending msgs)"
-                                )
-                                continue
-                            tasks.append(
-                                _rechunk_and_embed_contact(
-                                    contact.user_id, contact_id, redis_client
-                                )
-                            )
-                            queued += 1
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-            if skipped_paused:
                 logger.info(
-                    f"[CONSUMER] Periodic flush done: {queued} processed, "
-                    f"{skipped_paused} skipped (user paused)"
+                    f"[CONSUMER] Periodic flush: {len(pending)} contacts with pending messages"
                 )
-        except Exception as e:
-            logger.error(f"[CONSUMER] Periodic rechunk error: {e}", exc_info=True)
+
+                # Process in batches of 3 to avoid DB pool exhaustion
+                items = [(cid, cnt) for cid, cnt in pending.items() if cnt > 0]
+                skipped_paused = 0
+                queued = 0
+                for i in range(0, len(items), 3):
+                    batch = items[i : i + 3]
+                    tasks = []
+                    for contact_id, count in batch:
+                        async with async_session() as db:
+                            contact = await db.get(Contact, contact_id)
+                            if contact:
+                                # Skip if user is globally paused
+                                if await _is_user_paused(redis_client, contact.user_id):
+                                    skipped_paused += 1
+                                    logger.info(
+                                        f"[CONSUMER] PAUSED — skipping periodic rechunk "
+                                        f"for {contact.display_name} ({count} pending msgs)"
+                                    )
+                                    continue
+                                tasks.append(
+                                    _rechunk_and_embed_contact(
+                                        contact.user_id, contact_id, redis_client
+                                    )
+                                )
+                                queued += 1
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
+                if skipped_paused:
+                    logger.info(
+                        f"[CONSUMER] Periodic flush done: {queued} processed, "
+                        f"{skipped_paused} skipped (user paused)"
+                    )
+            except Exception as e:
+                logger.error(f"[CONSUMER] Periodic rechunk error: {e}", exc_info=True)
+    except asyncio.CancelledError:
+        logger.info("[CONSUMER] Periodic rechunk task cancelled")
+        raise
 
 
 async def _listen_user_name_updates():
     """Listen for telegram:update_user_name:* events and persist to DB.
 
     Uses pattern subscription so it auto-captures all per-user channels.
+    Uses get_message() with timeout instead of async generator to avoid
+    'aclose(): asynchronous generator is already running' errors on shutdown.
     """
     from app.models.user import User
 
@@ -569,7 +586,13 @@ async def _listen_user_name_updates():
     logger.info("[CONSUMER] Subscribed to telegram:update_user_name:*")
 
     try:
-        async for message in pubsub.listen():
+        while True:
+            # Use get_message with timeout instead of async for to allow clean cancellation
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
+                # No message within timeout, check for cancellation
+                await asyncio.sleep(0.1)
+                continue
             if message["type"] != "pmessage":
                 continue
             try:
@@ -585,11 +608,22 @@ async def _listen_user_name_updates():
             except Exception as e:
                 logger.warning(f"[CONSUMER] Failed to update user name: {e}")
     except asyncio.CancelledError:
-        pass
+        logger.info("[CONSUMER] User name listener cancelled")
+        raise
     finally:
-        await pubsub.punsubscribe()
-        await pubsub.close()
-        await redis_client.close()
+        # Defensive cleanup — ignore errors during shutdown
+        try:
+            await pubsub.punsubscribe()
+        except Exception:
+            pass
+        try:
+            await pubsub.close()
+        except Exception:
+            pass
+        try:
+            await redis_client.close()
+        except Exception:
+            pass
 
 
 async def run_catchup_processing(
@@ -685,14 +719,19 @@ async def start_message_consumer():
     await pubsub.psubscribe("telegram:new_messages:*")
 
     # Start periodic flusher (with redis access for pause checks)
-    asyncio.create_task(_periodic_rechunk(redis_client))
+    periodic_task = asyncio.create_task(_periodic_rechunk(redis_client))
     # Listen for user name updates from monitor
-    asyncio.create_task(_listen_user_name_updates())
+    user_name_task = asyncio.create_task(_listen_user_name_updates())
 
     logger.info("[CONSUMER] Subscribed to telegram:new_messages:*")
 
     try:
-        async for message in pubsub.listen():
+        while True:
+            # Use get_message with timeout instead of async for to allow clean cancellation
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
+                await asyncio.sleep(0.1)
+                continue
             if message["type"] == "pmessage":
                 try:
                     msg_data = json.loads(message["data"])
@@ -704,7 +743,27 @@ async def start_message_consumer():
     except asyncio.CancelledError:
         logger.info("[CONSUMER] Shutting down...")
     finally:
-        await pubsub.punsubscribe()
-        await pubsub.close()
-        await redis_client.close()
+        # Cancel background tasks and wait for them to finish
+        for task in (periodic_task, user_name_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        # Cleanup pubsub/redis connections
+        try:
+            await pubsub.punsubscribe()
+        except Exception:
+            pass
+        try:
+            await pubsub.close()
+        except Exception:
+            pass
+        try:
+            await redis_client.close()
+        except Exception:
+            pass
         logger.info("[CONSUMER] Stopped")

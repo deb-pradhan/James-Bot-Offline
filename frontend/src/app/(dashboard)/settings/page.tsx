@@ -34,9 +34,12 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(false);
 
   // AI settings state
-  const [customApiKey, setCustomApiKey] = useState("");
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [validatingKey, setValidatingKey] = useState(false);
+  const [anthropicApiKey, setAnthropicApiKey] = useState("");
+  const [openaiApiKey, setOpenaiApiKey] = useState("");
+  const [showAnthropicApiKey, setShowAnthropicApiKey] = useState(false);
+  const [showOpenaiApiKey, setShowOpenaiApiKey] = useState(false);
+  const [validatingAnthropicKey, setValidatingAnthropicKey] = useState(false);
+  const [validatingOpenaiKey, setValidatingOpenaiKey] = useState(false);
 
   // Delete data state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -135,39 +138,74 @@ export default function SettingsPage() {
 
   // Custom API key mutation
   const apiKeyMutation = useMutation({
-    mutationFn: async (apiKey: string | null) => {
+    mutationFn: async ({
+      apiKey,
+      provider,
+    }: {
+      apiKey: string | null;
+      provider: "anthropic" | "openai";
+    }) => {
       if (apiKey) {
-        // Validate first
-        const result = await api.settings.validateApiKey(apiKey);
+        const result = await api.settings.validateApiKey(apiKey, provider);
         if (!result.valid) {
           throw new Error(result.message);
         }
       }
-      // Save to preferences
-      return api.settings.updatePreferences({ anthropic_api_key: apiKey });
+      if (provider === "anthropic") {
+        return api.settings.updatePreferences({ anthropic_api_key: apiKey });
+      }
+      return api.settings.updatePreferences({ openai_api_key: apiKey });
     },
-    onSuccess: (_, apiKey) => {
+    onSuccess: (_, payload) => {
       queryClient.invalidateQueries({ queryKey: ["ai-status"] });
-      setCustomApiKey("");
-      toast.success(apiKey ? "Custom API key saved" : "Custom API key removed");
+      if (payload.provider === "anthropic") {
+        setAnthropicApiKey("");
+      } else {
+        setOpenaiApiKey("");
+      }
+      toast.success(
+        payload.apiKey
+          ? `${payload.provider === "anthropic" ? "Anthropic" : "OpenAI"} API key saved`
+          : `${payload.provider === "anthropic" ? "Anthropic" : "OpenAI"} API key removed`
+      );
     },
     onError: (err: Error) => {
       toast.error(err.message || "Failed to save API key");
     },
   });
 
-  const handleSaveApiKey = async () => {
-    if (!customApiKey.trim()) return;
-    setValidatingKey(true);
+  const handleSaveAnthropicKey = async () => {
+    if (!anthropicApiKey.trim()) return;
+    setValidatingAnthropicKey(true);
     try {
-      await apiKeyMutation.mutateAsync(customApiKey.trim());
+      await apiKeyMutation.mutateAsync({
+        apiKey: anthropicApiKey.trim(),
+        provider: "anthropic",
+      });
     } finally {
-      setValidatingKey(false);
+      setValidatingAnthropicKey(false);
     }
   };
 
-  const handleRemoveApiKey = () => {
-    apiKeyMutation.mutate(null);
+  const handleRemoveAnthropicKey = () => {
+    apiKeyMutation.mutate({ apiKey: null, provider: "anthropic" });
+  };
+
+  const handleSaveOpenaiKey = async () => {
+    if (!openaiApiKey.trim()) return;
+    setValidatingOpenaiKey(true);
+    try {
+      await apiKeyMutation.mutateAsync({
+        apiKey: openaiApiKey.trim(),
+        provider: "openai",
+      });
+    } finally {
+      setValidatingOpenaiKey(false);
+    }
+  };
+
+  const handleRemoveOpenaiKey = () => {
+    apiKeyMutation.mutate({ apiKey: null, provider: "openai" });
   };
 
   // Delete all data mutation
@@ -376,53 +414,89 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Custom API Key */}
+      {/* API Keys */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Key className="h-4 w-4 text-primary" strokeWidth={1.5} />
-                Custom Claude API Key
+                LLM + Embedding API Keys
               </CardTitle>
               <CardDescription>
-                Use your own Anthropic API key for AI features
+                Bring your own provider keys. OpenAI key is used for embeddings and GPT models.
               </CardDescription>
             </div>
-            {aiStatus?.has_custom_api_key && (
+            {(aiStatus?.has_anthropic_api_key || aiStatus?.has_openai_api_key) && (
               <Badge variant="default">Custom Key Active</Badge>
             )}
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {aiStatus?.has_custom_api_key ? (
-            <div className="flex items-center justify-between p-4 border border-signal-success/20 bg-signal-success/5">
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="h-5 w-5 text-signal-success" strokeWidth={1.5} />
+          <div className="p-4 border border-border-element space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-ink-primary">Anthropic key (Claude models)</p>
+                <p className="text-xs text-ink-tertiary mt-0.5">
+                  Needed only if you select a Claude model.
+                </p>
+              </div>
+              {aiStatus?.has_anthropic_api_key && <Badge variant="default">Configured</Badge>}
+            </div>
+            {aiStatus?.has_anthropic_api_key ? (
+              <div className="flex items-center justify-between p-3 border border-signal-success/20 bg-signal-success/5">
                 <div>
-                  <p className="text-sm text-signal-success">Custom API key configured</p>
+                  <p className="text-sm text-signal-success">Anthropic API key configured</p>
                   <p className="text-xs text-signal-success/70">
-                    All AI calls use your personal Anthropic API key
+                    Claude requests are billed to your Anthropic account.
                   </p>
                 </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRemoveAnthropicKey}
+                  disabled={apiKeyMutation.isPending}
+                  className="text-signal-error hover:text-signal-error"
+                >
+                  <Trash2 className="h-4 w-4 mr-1" strokeWidth={1.5} />
+                  Remove
+                </Button>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRemoveApiKey}
-                disabled={apiKeyMutation.isPending}
-                className="text-signal-error hover:text-signal-error"
-              >
-                <Trash2 className="h-4 w-4 mr-1" strokeWidth={1.5} />
-                Remove
-              </Button>
-            </div>
-          ) : (
-            <>
+            ) : (
               <div className="space-y-2">
-                <p className="text-sm text-ink-secondary">
-                  Enter your Anthropic API key to use your own account for AI features.
-                  Get your key from{" "}
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input
+                      type={showAnthropicApiKey ? "text" : "password"}
+                      placeholder="sk-ant-api03-..."
+                      value={anthropicApiKey}
+                      onChange={(e) => setAnthropicApiKey(e.target.value)}
+                      disabled={validatingAnthropicKey}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAnthropicApiKey(!showAnthropicApiKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-tertiary hover:text-ink-secondary"
+                    >
+                      {showAnthropicApiKey ? (
+                        <EyeOff className="h-4 w-4" strokeWidth={1.5} />
+                      ) : (
+                        <Eye className="h-4 w-4" strokeWidth={1.5} />
+                      )}
+                    </button>
+                  </div>
+                  <Button
+                    onClick={handleSaveAnthropicKey}
+                    disabled={!anthropicApiKey.trim() || validatingAnthropicKey}
+                  >
+                    {validatingAnthropicKey ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
+                    ) : null}
+                    Save
+                  </Button>
+                </div>
+                <p className="text-xs text-ink-tertiary">
+                  Get key:{" "}
                   <a
                     href="https://console.anthropic.com/settings/keys"
                     target="_blank"
@@ -433,21 +507,56 @@ export default function SettingsPage() {
                     <ExternalLink className="ml-1 inline h-3 w-3" strokeWidth={1.5} />
                   </a>
                 </p>
+              </div>
+            )}
+          </div>
+
+          <div className="p-4 border border-border-element space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-ink-primary">OpenAI key (embeddings + GPT models)</p>
+                <p className="text-xs text-ink-tertiary mt-0.5">
+                  Used for embeddings and OpenAI chat models.
+                </p>
+              </div>
+              {aiStatus?.has_openai_api_key && <Badge variant="default">Configured</Badge>}
+            </div>
+            {aiStatus?.has_openai_api_key ? (
+              <div className="flex items-center justify-between p-3 border border-signal-success/20 bg-signal-success/5">
+                <div>
+                  <p className="text-sm text-signal-success">OpenAI API key configured</p>
+                  <p className="text-xs text-signal-success/70">
+                    Embeddings and GPT requests are billed to your OpenAI account.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRemoveOpenaiKey}
+                  disabled={apiKeyMutation.isPending}
+                  className="text-signal-error hover:text-signal-error"
+                >
+                  <Trash2 className="h-4 w-4 mr-1" strokeWidth={1.5} />
+                  Remove
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2">
                 <div className="flex gap-2">
                   <div className="relative flex-1">
                     <Input
-                      type={showApiKey ? "text" : "password"}
-                      placeholder="sk-ant-api03-..."
-                      value={customApiKey}
-                      onChange={(e) => setCustomApiKey(e.target.value)}
-                      disabled={validatingKey}
+                      type={showOpenaiApiKey ? "text" : "password"}
+                      placeholder="sk-proj-..."
+                      value={openaiApiKey}
+                      onChange={(e) => setOpenaiApiKey(e.target.value)}
+                      disabled={validatingOpenaiKey}
                     />
                     <button
                       type="button"
-                      onClick={() => setShowApiKey(!showApiKey)}
+                      onClick={() => setShowOpenaiApiKey(!showOpenaiApiKey)}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-tertiary hover:text-ink-secondary"
                     >
-                      {showApiKey ? (
+                      {showOpenaiApiKey ? (
                         <EyeOff className="h-4 w-4" strokeWidth={1.5} />
                       ) : (
                         <Eye className="h-4 w-4" strokeWidth={1.5} />
@@ -455,25 +564,35 @@ export default function SettingsPage() {
                     </button>
                   </div>
                   <Button
-                    onClick={handleSaveApiKey}
-                    disabled={!customApiKey.trim() || validatingKey}
+                    onClick={handleSaveOpenaiKey}
+                    disabled={!openaiApiKey.trim() || validatingOpenaiKey}
                   >
-                    {validatingKey ? (
+                    {validatingOpenaiKey ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" strokeWidth={1.5} />
                     ) : null}
-                    Save Key
+                    Save
                   </Button>
                 </div>
+                <p className="text-xs text-ink-tertiary">
+                  Get key:{" "}
+                  <a
+                    href="https://platform.openai.com/api-keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:text-[#4B8AFF] transition-colors"
+                  >
+                    platform.openai.com
+                    <ExternalLink className="ml-1 inline h-3 w-3" strokeWidth={1.5} />
+                  </a>
+                </p>
               </div>
-              <div className="p-3 border border-border-element bg-surface-inset text-xs text-ink-tertiary">
-                <p className="font-medium text-ink-secondary mb-1">Why use your own key?</p>
-                <ul className="list-disc list-inside space-y-0.5">
-                  <li>Direct billing to your Anthropic account</li>
-                  <li>Access to your own rate limits</li>
-                  <li>Full control over API usage</li>
-                </ul>
-              </div>
-            </>
+            )}
+          </div>
+
+          {!aiStatus?.can_use_embeddings && (
+            <div className="p-3 border border-signal-warning/20 bg-signal-warning/5 text-xs text-signal-warning">
+              Embeddings are unavailable. Add an OpenAI API key to enable retrieval and document indexing.
+            </div>
           )}
         </CardContent>
       </Card>

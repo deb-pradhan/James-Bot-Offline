@@ -24,6 +24,7 @@ async def retrieve_relevant_chunks(
     contact_id: uuid.UUID | None = None,
     top_k: int = 10,
     include_documents: bool = True,
+    user_settings: dict | None = None,
 ) -> dict:
     """
     Retrieve relevant conversation + document chunks via vector similarity.
@@ -41,7 +42,10 @@ async def retrieve_relevant_chunks(
 
     # Embed the query
     query_embedding = await embed_query(
-        query_text, user_id=user_id, operation="embedding_query"
+        query_text,
+        user_id=user_id,
+        operation="embedding_query",
+        user_settings=user_settings,
     )
 
     # ── Conversation chunks ──

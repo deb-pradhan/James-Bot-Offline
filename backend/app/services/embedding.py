@@ -2,7 +2,7 @@
 Embedding service — OpenAI primary, Voyage AI fallback.
 
 OpenAI: text-embedding-3-small (512 dimensions via `dimensions` param)
-Voyage: voyage-3-lite (512 dimensions natively)
+Voyage: voyage-4-lite (512 dimensions natively)
 
 Both produce 512-dim vectors to match the pgvector column.
 """
@@ -50,10 +50,14 @@ async def _call_with_retry(
 
 
 async def _embed_openai(
-    texts: list[str], input_type: str
+    texts: list[str],
+    input_type: str,
+    *,
+    api_key: str | None,
+    model: str,
 ) -> tuple[list[list[float]], int] | None:
     """Try OpenAI embeddings. Returns (embeddings, token_count) or None on failure."""
-    if not settings.openai_api_key:
+    if not api_key:
         return None
 
     try:
@@ -62,11 +66,11 @@ async def _embed_openai(
                 client,
                 OPENAI_API_URL,
                 headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 payload={
-                    "model": settings.openai_embedding_model,
+                    "model": model,
                     "input": texts,
                     "dimensions": settings.embedding_dimension,
                     "encoding_format": "float",
@@ -95,13 +99,17 @@ async def _embed_openai(
 
 
 async def _embed_voyage(
-    texts: list[str], input_type: str
+    texts: list[str],
+    input_type: str,
+    *,
+    api_key: str | None,
+    model: str,
 ) -> tuple[list[list[float]], int]:
     """Voyage AI embeddings (fallback). Returns (embeddings, token_count). Raises on failure."""
-    if not settings.voyageai_api_key:
+    if not api_key:
         raise RuntimeError(
             "No embedding provider available: "
-            "both OPENAI_API_KEY and VOYAGEAI_API_KEY are missing"
+            "both OpenAI and Voyage API keys are missing in user settings"
         )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -109,11 +117,11 @@ async def _embed_voyage(
             client,
             VOYAGE_API_URL,
             headers={
-                "Authorization": f"Bearer {settings.voyageai_api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             payload={
-                "model": settings.voyageai_embedding_model,
+                "model": model,
                 "input": texts,
                 "input_type": input_type,
             },
@@ -143,6 +151,7 @@ async def embed_texts(
     *,
     user_id: uuid.UUID | None = None,
     operation: str | None = None,
+    user_settings: dict | None = None,
 ) -> list[list[float]]:
     """
     Embed texts using OpenAI (primary) with Voyage AI fallback.
@@ -159,10 +168,22 @@ async def embed_texts(
     if not texts:
         return []
 
-    if not settings.openai_api_key and not settings.voyageai_api_key:
+    active_settings = user_settings or {}
+    openai_key = active_settings.get("openai_api_key")
+    voyage_key = active_settings.get("voyageai_api_key")
+    openai_model = (
+        active_settings.get("openai_embedding_model")
+        or settings.openai_embedding_model
+    )
+    voyage_model = (
+        active_settings.get("voyageai_embedding_model")
+        or settings.voyageai_embedding_model
+    )
+
+    if not openai_key and not voyage_key:
         raise ValueError(
-            "No embedding API key configured. "
-            "Set OPENAI_API_KEY or VOYAGEAI_API_KEY."
+            "No embedding API key configured for this user. "
+            "Set `openai_api_key` (or `voyageai_api_key`) in settings."
         )
 
     all_embeddings: list[list[float]] = []
@@ -177,7 +198,12 @@ async def embed_texts(
         )
 
         # Try OpenAI first
-        openai_result = await _embed_openai(batch, input_type)
+        openai_result = await _embed_openai(
+            batch,
+            input_type,
+            api_key=openai_key,
+            model=openai_model,
+        )
 
         if openai_result is not None:
             embeddings, tokens = openai_result
@@ -185,7 +211,12 @@ async def embed_texts(
             all_embeddings.extend(embeddings)
         else:
             # Fall back to Voyage AI
-            embeddings, tokens = await _embed_voyage(batch, input_type)
+            embeddings, tokens = await _embed_voyage(
+                batch,
+                input_type,
+                api_key=voyage_key,
+                model=voyage_model,
+            )
             voyage_tokens += tokens
             all_embeddings.extend(embeddings)
 
@@ -199,7 +230,7 @@ async def embed_texts(
             await record_embedding_usage(
                 user_id=user_id,
                 provider="openai",
-                model=settings.openai_embedding_model,
+                model=openai_model,
                 total_tokens=openai_tokens,
                 operation=operation,
             )
@@ -207,7 +238,7 @@ async def embed_texts(
             await record_embedding_usage(
                 user_id=user_id,
                 provider="voyageai",
-                model=settings.voyageai_embedding_model,
+                model=voyage_model,
                 total_tokens=voyage_tokens,
                 operation=operation,
             )
@@ -220,9 +251,14 @@ async def embed_query(
     *,
     user_id: uuid.UUID | None = None,
     operation: str | None = None,
+    user_settings: dict | None = None,
 ) -> list[float]:
     """Embed a single query text for similarity search."""
     results = await embed_texts(
-        [text], input_type="query", user_id=user_id, operation=operation
+        [text],
+        input_type="query",
+        user_id=user_id,
+        operation=operation,
+        user_settings=user_settings,
     )
     return results[0]

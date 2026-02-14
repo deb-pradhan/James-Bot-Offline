@@ -2,9 +2,10 @@
 Cost tracking service — records API usage and calculates costs.
 
 Pricing (per 1M tokens):
-- Anthropic Claude Sonnet 4: $3.00 input / $15.00 output
+- Anthropic Claude models (configured): see PRICING table below
+- OpenAI GPT-4.1 / GPT-4.1 mini: $2.00/$8.00 and $0.40/$1.60
 - OpenAI text-embedding-3-small: $0.02
-- Voyage AI voyage-3-lite: $0.02
+- Voyage AI voyage-4-lite: $0.02
 """
 
 import logging
@@ -32,12 +33,30 @@ PRICING = {
         "input": 15.00,
         "output": 75.00,
     },
+    # OpenAI chat
+    ("openai", "gpt-4.1-mini"): {
+        "input": 0.40,
+        "output": 1.60,
+    },
+    ("openai", "gpt-4.1"): {
+        "input": 2.00,
+        "output": 8.00,
+    },
     # OpenAI embeddings
     ("openai", "text-embedding-3-small"): {
         "input": 0.02,
         "output": 0.0,
     },
     # Voyage AI embeddings
+    ("voyageai", "voyage-4-lite"): {
+        "input": 0.02,
+        "output": 0.0,
+    },
+    # Compatibility aliases used by older user settings.
+    ("voyageai", "voyage-3.5-lite"): {
+        "input": 0.02,
+        "output": 0.0,
+    },
     ("voyageai", "voyage-3-lite"): {
         "input": 0.02,
         "output": 0.0,
@@ -65,18 +84,19 @@ def calculate_cost(
 
 async def record_llm_usage(
     user_id: uuid.UUID,
+    service: str,
     model: str,
     operation: str,
     input_tokens: int,
     output_tokens: int,
 ) -> None:
-    """Record LLM (Anthropic) API usage. Uses its own DB session."""
+    """Record LLM API usage. Uses its own DB session."""
     try:
-        cost = calculate_cost("anthropic", model, input_tokens, output_tokens)
+        cost = calculate_cost(service, model, input_tokens, output_tokens)
         async with async_session() as session:
             usage = ApiUsage(
                 user_id=user_id,
-                service="anthropic",
+                service=service,
                 model=model,
                 operation=operation,
                 input_tokens=input_tokens,

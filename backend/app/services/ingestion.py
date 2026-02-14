@@ -392,6 +392,7 @@ async def ingest_telegram_export(
             embeddings = await embed_texts(
                 texts, input_type="document",
                 user_id=user_id, operation="embedding_ingest",
+                user_settings=user_settings,
             )
 
             for chunk, emb in zip(batch, embeddings):

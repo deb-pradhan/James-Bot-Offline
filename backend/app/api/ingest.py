@@ -434,6 +434,7 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Missing filename")
 
     logger.info(f"[INGEST] Document upload: {file.filename} by {user.email}")
+    user_prefs = get_user_settings(user)
 
     content = await file.read()
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "unknown"
@@ -468,6 +469,7 @@ async def upload_document(
     embeddings = await embed_texts(
         chunks, input_type="document",
         user_id=user.id, operation="embedding_document",
+        user_settings=user_prefs,
     )
 
     for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
@@ -499,6 +501,7 @@ async def ingest_url(
 ):
     """Scrape and ingest content from a URL."""
     logger.info(f"[INGEST] URL ingest: {req.url} by {user.email}")
+    user_prefs = get_user_settings(user)
 
     try:
         text = await parse_document("url.html", url=req.url)
@@ -526,6 +529,7 @@ async def ingest_url(
     embeddings = await embed_texts(
         chunks, input_type="document",
         user_id=user.id, operation="embedding_document",
+        user_settings=user_prefs,
     )
 
     for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):

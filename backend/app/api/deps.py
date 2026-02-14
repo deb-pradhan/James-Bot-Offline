@@ -72,5 +72,9 @@ def get_user_settings(user: User) -> dict:
         "ai_enabled": True,
         "llm_model": None,
         "anthropic_api_key": None,
+        "openai_api_key": None,
+        "voyageai_api_key": None,
+        "openai_embedding_model": None,
+        "voyageai_embedding_model": None,
     }
     return {**defaults, **(user.settings or {})}

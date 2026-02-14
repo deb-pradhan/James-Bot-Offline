@@ -30,6 +30,7 @@ class Settings(BaseSettings):
                 "id": "claude-3-5-haiku-20241022",
                 "name": "Claude 3.5 Haiku",
                 "description": "Fastest, lowest cost. Good for simple replies.",
+                "provider": "anthropic",
                 "tier": "fast",
                 "input_cost_per_m": 0.80,
                 "output_cost_per_m": 4.00,
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
                 "id": "claude-sonnet-4-20250514",
                 "name": "Claude Sonnet 4",
                 "description": "Balanced speed & quality. Recommended default.",
+                "provider": "anthropic",
                 "tier": "balanced",
                 "input_cost_per_m": 3.00,
                 "output_cost_per_m": 15.00,
@@ -46,9 +48,28 @@ class Settings(BaseSettings):
                 "id": "claude-4-opus-20250514",
                 "name": "Claude 4 Opus",
                 "description": "Most capable. Best for nuanced ghostwriting.",
+                "provider": "anthropic",
                 "tier": "premium",
                 "input_cost_per_m": 15.00,
                 "output_cost_per_m": 75.00,
+            },
+            {
+                "id": "gpt-4.1-mini",
+                "name": "GPT-4.1 Mini",
+                "description": "Fast and cost-efficient OpenAI option.",
+                "provider": "openai",
+                "tier": "fast",
+                "input_cost_per_m": 0.40,
+                "output_cost_per_m": 1.60,
+            },
+            {
+                "id": "gpt-4.1",
+                "name": "GPT-4.1",
+                "description": "High quality OpenAI model for deeper reasoning.",
+                "provider": "openai",
+                "tier": "balanced",
+                "input_cost_per_m": 2.00,
+                "output_cost_per_m": 8.00,
             },
         ]
 
@@ -56,7 +77,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     voyageai_api_key: str = ""
-    voyageai_embedding_model: str = "voyage-3-lite"
+    voyageai_embedding_model: str = "voyage-4-lite"
     embedding_dimension: int = 512
 
     # Telegram (for in-app auth flow)
@@ -74,7 +95,7 @@ class Settings(BaseSettings):
     smtp_from_name: str = "James Bot"
     reset_token_expire_minutes: int = 15
 
-    # CORS
+    # CORS (comma-separated list of allowed origins)
     cors_origins: str = "http://localhost:3000"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
@@ -91,7 +112,12 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",")]
+        """Build CORS origins list, auto-including frontend_url if not already present."""
+        origins = {o.strip() for o in self.cors_origins.split(",") if o.strip()}
+        # Always include frontend_url for convenience
+        if self.frontend_url and self.frontend_url not in origins:
+            origins.add(self.frontend_url)
+        return list(origins)
 
 
 @lru_cache

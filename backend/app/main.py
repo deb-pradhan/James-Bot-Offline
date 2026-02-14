@@ -96,6 +96,8 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info(f"  Starting {settings.app_name}")
     logger.info(f"  Debug: {settings.debug}")
+    logger.info(f"  CORS Origins: {settings.cors_origin_list}")
+    logger.info(f"  Frontend URL: {settings.frontend_url}")
     logger.info("=" * 60)
 
     # Init database (pgvector extension)
@@ -145,14 +147,65 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Custom CORS middleware that allows Railway domains dynamically
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+
+class FlexibleCORSMiddleware(BaseHTTPMiddleware):
+    """CORS middleware that allows configured origins + Railway domains."""
+    
+    def __init__(self, app, allowed_origins: list[str]):
+        super().__init__(app)
+        self.allowed_origins = set(allowed_origins)
+        logger.info(f"[CORS] Configured origins: {self.allowed_origins}")
+    
+    def is_origin_allowed(self, origin: str) -> bool:
+        if not origin:
+            return False
+        # Exact match
+        if origin in self.allowed_origins:
+            return True
+        # Allow any Railway domain (*.up.railway.app)
+        if origin.endswith(".up.railway.app") or origin.endswith(".railway.app"):
+            logger.info(f"[CORS] Auto-allowing Railway origin: {origin}")
+            return True
+        # Allow localhost variants for development
+        if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+            return True
+        return False
+    
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin", "")
+        
+        # Handle preflight OPTIONS request
+        if request.method == "OPTIONS":
+            if self.is_origin_allowed(origin):
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+                        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Requested-With",
+                        "Access-Control-Allow-Credentials": "true",
+                        "Access-Control-Max-Age": "600",
+                    },
+                )
+            else:
+                logger.warning(f"[CORS] Rejected origin: {origin}")
+                return Response(status_code=400, content="CORS origin not allowed")
+        
+        # Handle actual request
+        response = await call_next(request)
+        
+        if self.is_origin_allowed(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        
+        return response
+
+
+app.add_middleware(FlexibleCORSMiddleware, allowed_origins=settings.cors_origin_list)
 
 # Routes
 app.include_router(api_router)

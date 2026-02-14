@@ -606,13 +606,13 @@ async def get_costs(
         )
     ).scalar() or 0
 
-    # ── Token totals: LLM (anthropic) vs embedding ──
+    # ── Token totals: LLM (anthropic/openai) vs embeddings ──
     llm_tokens = (
         await db.execute(
             select(
                 func.coalesce(func.sum(ApiUsage.input_tokens), 0),
                 func.coalesce(func.sum(ApiUsage.output_tokens), 0),
-            ).where(base_filter, ApiUsage.service == "anthropic")
+            ).where(base_filter, ApiUsage.service.in_(["anthropic", "openai"]))
         )
     ).one()
     total_llm_in, total_llm_out = int(llm_tokens[0]), int(llm_tokens[1])
@@ -620,7 +620,8 @@ async def get_costs(
     embed_tokens = (
         await db.execute(
             select(func.coalesce(func.sum(ApiUsage.input_tokens), 0)).where(
-                base_filter, ApiUsage.service != "anthropic"
+                base_filter,
+                ApiUsage.service.notin_(["anthropic", "openai"]),
             )
         )
     ).scalar()

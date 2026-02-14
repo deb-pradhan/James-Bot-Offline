@@ -80,7 +80,12 @@ async def generate_reply(
     # Retrieve relevant context
     logger.info("[RESPOND] Retrieving relevant context...")
     context = await retrieve_relevant_chunks(
-        db, user_id, query_text, contact_id=contact_id, top_k=8
+        db,
+        user_id,
+        query_text,
+        contact_id=contact_id,
+        top_k=8,
+        user_settings=user_settings,
     )
 
     # Format context for prompt
@@ -159,7 +164,12 @@ async def query_chat_history(
 
     # Retrieve relevant context
     context = await retrieve_relevant_chunks(
-        db, user_id, question, contact_id=contact_id, top_k=12
+        db,
+        user_id,
+        question,
+        contact_id=contact_id,
+        top_k=12,
+        user_settings=user_settings,
     )
 
     conv_context = format_context_chunks(context["conversation_chunks"])

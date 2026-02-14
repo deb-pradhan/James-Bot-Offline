@@ -1,5 +1,5 @@
 """
-Anthropic Claude API wrapper for all LLM operations:
+LLM provider wrapper for all LLM operations:
 - Response generation (ghostwriting)
 - Chat history querying
 - Style analysis
@@ -8,14 +8,15 @@ Anthropic Claude API wrapper for all LLM operations:
 
 import logging
 import uuid
+import httpx
 from anthropic import AsyncAnthropic
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-_client: AsyncAnthropic | None = None
 _custom_clients: dict[str, AsyncAnthropic] = {}
+OPENAI_CHAT_API_URL = "https://api.openai.com/v1/chat/completions"
 
 
 class AIDisabledError(Exception):
@@ -23,22 +24,43 @@ class AIDisabledError(Exception):
     pass
 
 
-def get_client(custom_api_key: str | None = None) -> AsyncAnthropic:
-    """Get Anthropic client, optionally with user's custom API key."""
-    global _client
+def get_anthropic_client(custom_api_key: str) -> AsyncAnthropic:
+    """Get Anthropic client for a specific user key."""
+    if not custom_api_key:
+        raise ValueError(
+            "Anthropic API key not configured for this user. "
+            "Set `anthropic_api_key` in user settings."
+        )
+    if custom_api_key not in _custom_clients:
+        _custom_clients[custom_api_key] = AsyncAnthropic(api_key=custom_api_key)
+    return _custom_clients[custom_api_key]
 
-    # If custom key provided, return/cache a dedicated client
-    if custom_api_key:
-        if custom_api_key not in _custom_clients:
-            _custom_clients[custom_api_key] = AsyncAnthropic(api_key=custom_api_key)
-        return _custom_clients[custom_api_key]
 
-    # Default client using env key
-    if _client is None:
-        if not settings.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY not configured")
-        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
+def _resolve_provider(model: str) -> str:
+    model_by_id = {m["id"]: m for m in settings.available_models}
+    model_info = model_by_id.get(model, {})
+    provider = model_info.get("provider")
+    if provider in {"anthropic", "openai"}:
+        return provider
+
+    # Fallback for unknown custom model IDs.
+    return "anthropic" if model.startswith("claude") else "openai"
+
+
+def _extract_text_from_openai_response(payload: dict) -> str:
+    choices = payload.get("choices", [])
+    if not choices:
+        raise RuntimeError("OpenAI returned no choices")
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "".join(text_parts).strip()
+    return str(content).strip()
 
 
 def check_ai_enabled(user_settings: dict | None) -> None:
@@ -58,38 +80,71 @@ async def generate_response(
     model: str | None = None,
     user_settings: dict | None = None,
 ) -> str:
-    """Generic Claude call with system + user prompt.
+    """Generic LLM call with system + user prompt.
 
     If user_id and operation are provided, records token usage and cost
     to the api_usage table.
 
     model: optional override — falls back to config default.
-    user_settings: user's preferences (for ai_enabled check and custom API key).
+    user_settings: user's preferences (for ai_enabled check and provider API keys).
     """
     # Check if AI is enabled
     check_ai_enabled(user_settings)
 
-    # Use custom API key if user provided one
-    custom_key = user_settings.get("anthropic_api_key") if user_settings else None
-    client = get_client(custom_key)
     active_model = model or settings.anthropic_model
+    provider = _resolve_provider(active_model)
 
     logger.info(
         f"[LLM] Generating response, model={active_model}, "
         f"max_tokens={max_tokens}, temp={temperature}"
     )
 
-    message = await client.messages.create(
-        model=active_model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    response_text = message.content[0].text
-    tokens_in = message.usage.input_tokens
-    tokens_out = message.usage.output_tokens
+    if provider == "anthropic":
+        anthropic_key = user_settings.get("anthropic_api_key") if user_settings else None
+        client = get_anthropic_client(anthropic_key)
+        message = await client.messages.create(
+            model=active_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        response_text = message.content[0].text
+        tokens_in = message.usage.input_tokens
+        tokens_out = message.usage.output_tokens
+    else:
+        openai_key = user_settings.get("openai_api_key") if user_settings else None
+        if not openai_key:
+            raise ValueError(
+                "OpenAI API key not configured for this user. "
+                "Set `openai_api_key` in user settings."
+            )
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(
+                OPENAI_CHAT_API_URL,
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": active_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"OpenAI chat completion failed: {response.status_code} - {response.text}"
+            )
+        data = response.json()
+        response_text = _extract_text_from_openai_response(data)
+        usage = data.get("usage", {})
+        tokens_in = int(usage.get("prompt_tokens", 0) or 0)
+        tokens_out = int(usage.get("completion_tokens", 0) or 0)
 
     logger.info(
         f"[LLM] Response generated: {tokens_in} input tokens, "
@@ -102,6 +157,7 @@ async def generate_response(
 
         await record_llm_usage(
             user_id=user_id,
+            service=provider,
             model=active_model,
             operation=operation,
             input_tokens=tokens_in,

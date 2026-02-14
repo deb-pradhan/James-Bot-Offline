@@ -1,12 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "=== James Bot API Starting (v2) ===" >&2
-echo "DATABASE_URL host: $(echo $DATABASE_URL | sed 's|.*@||;s|/.*||')" >&2
-echo "PORT=${PORT:-8000}" >&2
+echo "=== James Bot API Starting ==="
+echo "Running Alembic migrations..."
+python -m alembic upgrade head || echo "Migration warning (may be first run)"
 
-# Skip Alembic for now — DB already at v005
-echo "Skipping Alembic (DB pre-migrated). Starting server directly..." >&2
+echo "Starting FastAPI server on port ${PORT:-8000}..."
 
 exec uvicorn app.main:app \
     --host 0.0.0.0 \

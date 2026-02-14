@@ -5,6 +5,7 @@ Settings routes — Telegram connection (OTP flow), user preferences.
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -190,7 +191,47 @@ async def update_preferences(
     user: User = Depends(get_current_user),
 ):
     """Update user preferences/settings."""
-    user.settings = {**(user.settings or {}), **preferences}
+    merged_settings = {**(user.settings or {}), **preferences}
+
+    # Validate model/provider selection against available catalog and keys.
+    if "llm_model" in preferences and preferences["llm_model"]:
+        model_id = preferences["llm_model"]
+        model_by_id = {m["id"]: m for m in get_settings().available_models}
+        model_info = model_by_id.get(model_id)
+        if not model_info:
+            raise HTTPException(status_code=400, detail="Unsupported model selected")
+        provider = model_info.get("provider")
+        if provider == "anthropic" and not merged_settings.get("anthropic_api_key"):
+            raise HTTPException(
+                status_code=400,
+                detail="Set an Anthropic API key before selecting a Claude model",
+            )
+        if provider == "openai" and not merged_settings.get("openai_api_key"):
+            raise HTTPException(
+                status_code=400,
+                detail="Set an OpenAI API key before selecting an OpenAI model",
+            )
+
+    # Prevent removing a provider key that's required by current model.
+    if (
+        ("anthropic_api_key" in preferences and preferences.get("anthropic_api_key") is None)
+        or ("openai_api_key" in preferences and preferences.get("openai_api_key") is None)
+    ):
+        model_by_id = {m["id"]: m for m in get_settings().available_models}
+        current_model = merged_settings.get("llm_model")
+        current_provider = model_by_id.get(current_model, {}).get("provider")
+        if current_provider == "anthropic" and not merged_settings.get("anthropic_api_key"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove Anthropic key while a Claude model is selected",
+            )
+        if current_provider == "openai" and not merged_settings.get("openai_api_key"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove OpenAI key while an OpenAI model is selected",
+            )
+
+    user.settings = merged_settings
     await db.commit()
     logger.info(f"[SETTINGS] Updated preferences for {user.email}")
     return {"status": "updated", "settings": user.settings}
@@ -198,6 +239,7 @@ async def update_preferences(
 
 class ValidateApiKeyRequest(BaseModel):
     api_key: str
+    provider: str = "anthropic"
 
 
 @router.post("/validate-api-key")
@@ -205,37 +247,81 @@ async def validate_anthropic_api_key(
     req: ValidateApiKeyRequest,
     user: User = Depends(get_current_user),
 ):
-    """Validate a custom Anthropic API key by making a minimal API call."""
-    from anthropic import AsyncAnthropic, APIError
+    """Validate a custom API key (Anthropic or OpenAI) with a minimal API call."""
+    provider = (req.provider or "anthropic").lower()
 
-    try:
-        client = AsyncAnthropic(api_key=req.api_key)
-        # Make a minimal call to validate the key
-        await client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=1,
-            messages=[{"role": "user", "content": "Hi"}],
-        )
-        return {"valid": True, "message": "API key is valid"}
-    except APIError as e:
-        logger.warning(f"[SETTINGS] Invalid API key for {user.email}: {e}")
-        return {"valid": False, "message": f"Invalid API key: {e.message}"}
-    except Exception as e:
-        logger.error(f"[SETTINGS] API key validation error: {e}")
-        return {"valid": False, "message": f"Validation failed: {str(e)}"}
+    if provider == "anthropic":
+        from anthropic import AsyncAnthropic, APIError
+
+        try:
+            client = AsyncAnthropic(api_key=req.api_key)
+            await client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+            return {"valid": True, "message": "Anthropic API key is valid"}
+        except APIError as e:
+            logger.warning(f"[SETTINGS] Invalid Anthropic API key for {user.email}: {e}")
+            return {"valid": False, "message": f"Invalid Anthropic API key: {e.message}"}
+        except Exception as e:
+            logger.error(f"[SETTINGS] Anthropic key validation error: {e}")
+            return {"valid": False, "message": f"Validation failed: {str(e)}"}
+
+    if provider == "openai":
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {req.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "text-embedding-3-small",
+                        "input": ["ping"],
+                        "dimensions": 8,
+                    },
+                )
+            if response.status_code != 200:
+                logger.warning(
+                    f"[SETTINGS] Invalid OpenAI API key for {user.email}: "
+                    f"{response.status_code} {response.text}"
+                )
+                return {"valid": False, "message": "Invalid OpenAI API key"}
+            return {"valid": True, "message": "OpenAI API key is valid"}
+        except Exception as e:
+            logger.error(f"[SETTINGS] OpenAI key validation error: {e}")
+            return {"valid": False, "message": f"Validation failed: {str(e)}"}
+
+    return {
+        "valid": False,
+        "message": "Unsupported provider. Use 'anthropic' or 'openai'.",
+    }
 
 
 @router.get("/ai-status")
 async def get_ai_status(
     user: User = Depends(get_current_user),
 ):
-    """Get AI enabled status and custom API key info."""
+    """Get AI enabled status and provider-key availability."""
     user_settings = user.settings or {}
-    has_custom_key = bool(user_settings.get("anthropic_api_key"))
+    has_anthropic_key = bool(user_settings.get("anthropic_api_key"))
+    has_openai_key = bool(user_settings.get("openai_api_key"))
+    active_model = user_settings.get("llm_model")
+    model_by_id = {m["id"]: m for m in get_settings().available_models}
+    active_provider = (
+        model_by_id.get(active_model, {}).get("provider")
+        if active_model
+        else None
+    )
     return {
         "ai_enabled": user_settings.get("ai_enabled", True),
-        "has_custom_api_key": has_custom_key,
-        "using_custom_key": has_custom_key,
+        "has_custom_api_key": has_anthropic_key or has_openai_key,
+        "has_anthropic_api_key": has_anthropic_key,
+        "has_openai_api_key": has_openai_key,
+        "can_use_embeddings": has_openai_key or bool(user_settings.get("voyageai_api_key")),
+        "active_llm_provider": active_provider,
     }
 
 
