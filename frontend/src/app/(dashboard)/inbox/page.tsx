@@ -81,6 +81,8 @@ export default function InboxPage() {
         contacts: Contact[];
         total: number;
       }>,
+    refetchInterval: 30_000, // Poll every 30s as backup if WS events miss
+    refetchOnWindowFocus: true,
   });
 
   const handleRespondAll = async () => {

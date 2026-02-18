@@ -15,7 +15,9 @@ import sys
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import GetDialogFiltersRequest
 from telethon.tl.functions.messages import SaveDraftRequest
+from telethon.tl.types import DialogFilter
 from app.config import get_settings
 from app.relay import RedisRelay
 from app.handlers import register_handlers
@@ -30,6 +32,91 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+async def _extract_telegram_folders(client: TelegramClient) -> list[dict]:
+    """Fetch Telegram chat folders (dialog filters) for the authenticated user.
+
+    Uses timeouts to prevent blocking startup if entity resolution is slow.
+    """
+    try:
+        filters = await asyncio.wait_for(
+            client(GetDialogFiltersRequest()),
+            timeout=10.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[MONITOR] Timeout fetching dialog filters")
+        return []
+    except Exception as e:
+        logger.warning(f"[MONITOR] Failed to fetch dialog filters: {e}")
+        return []
+
+    folders: list[dict] = []
+
+    for f in filters:
+        if not isinstance(f, DialogFilter):
+            continue
+
+        title_raw = getattr(f, "title", None)
+        title = getattr(title_raw, "text", None) or str(title_raw or "Folder")
+
+        # Extract peer IDs directly from InputPeer objects (no slow entity resolution)
+        # This is much faster than calling get_entity() for each peer
+        include_peer_ids: list[str] = []
+        for peer in (f.include_peers or []):
+            peer_id = getattr(peer, "user_id", None) or getattr(peer, "chat_id", None) or getattr(peer, "channel_id", None)
+            if peer_id:
+                include_peer_ids.append(str(peer_id))
+
+        exclude_peer_ids: list[str] = []
+        for peer in (f.exclude_peers or []):
+            peer_id = getattr(peer, "user_id", None) or getattr(peer, "chat_id", None) or getattr(peer, "channel_id", None)
+            if peer_id:
+                exclude_peer_ids.append(str(peer_id))
+
+        folders.append(
+            {
+                "folder_id": int(f.id),
+                "title": title,
+                "emoticon": getattr(f, "emoticon", None),
+                "include_peer_ids": include_peer_ids,
+                "exclude_peer_ids": exclude_peer_ids,
+                "groups": bool(getattr(f, "groups", False)),
+                "contacts": bool(getattr(f, "contacts", False)),
+                "non_contacts": bool(getattr(f, "non_contacts", False)),
+                "broadcasts": bool(getattr(f, "broadcasts", False)),
+                "bots": bool(getattr(f, "bots", False)),
+                "exclude_muted": bool(getattr(f, "exclude_muted", False)),
+                "exclude_read": bool(getattr(f, "exclude_read", False)),
+                "exclude_archived": bool(getattr(f, "exclude_archived", False)),
+            }
+        )
+
+    logger.info(f"[MONITOR] Extracted {len(folders)} folder definitions")
+    return folders
+
+
+async def _publish_telegram_folders(
+    client: TelegramClient,
+    relay: RedisRelay,
+    user_id: str,
+):
+    """Publish Telegram folders to backend consumer + frontend events."""
+    folders = await _extract_telegram_folders(client)
+    payload = {
+        "user_id": user_id,
+        "folders": folders,
+    }
+    await relay.redis.publish(
+        f"telegram:update_folders:{user_id}",
+        json.dumps(payload),
+    )
+    await relay.publish_status(
+        user_id,
+        "telegram_folders_updated",
+        {"count": len(folders)},
+    )
+    logger.info(f"[MONITOR] Published {len(folders)} Telegram folders for user {user_id}")
 
 
 async def start_monitor(
@@ -76,13 +163,28 @@ async def start_monitor(
         )
     asyncio.create_task(_push_name())
 
+    # Publish Telegram folder definitions at startup (non-blocking, with timeout)
+    logger.info("[MONITOR] Fetching Telegram folders...")
+    try:
+        await asyncio.wait_for(
+            _publish_telegram_folders(client, relay, user_id),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[MONITOR] Folder fetch timed out, continuing without folders")
+    except Exception as e:
+        logger.warning(f"[MONITOR] Folder fetch failed: {e}, continuing")
+
     # Register event handlers (captures real-time messages going forward)
+    logger.info("[MONITOR] Registering event handlers...")
     register_handlers(client, relay, user_id, me.id)
 
     # Initial sync — fetch all existing dialogs + recent messages
     # This runs before the event loop so the DB has a full picture.
     # Dedup ensures real-time messages arriving during sync aren't doubled.
+    logger.info("[MONITOR] Starting initial sync...")
     await initial_sync(client, relay, user_id, me.id)
+    logger.info("[MONITOR] Initial sync complete, entering event loop")
 
     # Listen for send commands in a separate task (user-scoped channel)
     async def handle_send_commands():
@@ -114,12 +216,24 @@ async def start_monitor(
 
     send_task = asyncio.create_task(handle_send_commands())
 
+    # Periodic folder refresh so folder edits in Telegram auto-sync
+    async def periodic_folder_sync():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await _publish_telegram_folders(client, relay, user_id)
+            except Exception as e:
+                logger.warning(f"[MONITOR] Periodic folder sync failed: {e}")
+
+    folder_sync_task = asyncio.create_task(periodic_folder_sync())
+
     logger.info("[MONITOR] Listening for messages and send commands...")
 
     try:
         await client.run_until_disconnected()
     finally:
         send_task.cancel()
+        folder_sync_task.cancel()
         await relay.set_connected(user_id, False)
         logger.info("[MONITOR] Disconnected")
 

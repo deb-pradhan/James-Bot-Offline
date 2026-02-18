@@ -122,13 +122,21 @@ async def _save_message(
     )
     db.add(message)
 
-    # Update contact stats
+    # Update contact stats.
+    # Keep recency monotonic: message streams can arrive out-of-order
+    # during sync/reconnect, and we never want last_message_at to move backwards.
+    previous_last = contact.last_message_at
+    is_newest_message = previous_last is None or message.sent_at >= previous_last
+
     contact.total_messages = (contact.total_messages or 0) + 1
-    contact.last_message_at = message.sent_at
+    if is_newest_message:
+        contact.last_message_at = message.sent_at
+
     if is_incoming:
         contact.unresponded_count = (contact.unresponded_count or 0) + 1
-    else:
-        # User replied — reset unresponded count
+    elif is_newest_message:
+        # Only clear unread counter when this outgoing message is the latest one.
+        # Older out-of-order self messages should not clear newer unread items.
         contact.unresponded_count = 0
 
     await db.flush()

@@ -45,13 +45,20 @@ async def list_contacts(
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total = (await db.execute(count_stmt)).scalar() or 0
 
-    # Sort
+    # Sort — use nullslast() so contacts without messages sink to bottom
     if sort == "unresponded":
-        stmt = stmt.order_by(desc(Contact.unresponded_count), desc(Contact.last_message_at))
+        stmt = stmt.order_by(
+            desc(Contact.unresponded_count),
+            desc(Contact.last_message_at).nullslast(),
+            desc(Contact.created_at),
+        )
     elif sort == "name":
         stmt = stmt.order_by(Contact.display_name)
     else:
-        stmt = stmt.order_by(desc(Contact.last_message_at))
+        stmt = stmt.order_by(
+            desc(Contact.last_message_at).nullslast(),
+            desc(Contact.created_at),
+        )
 
     stmt = stmt.offset(offset).limit(limit)
     result = await db.execute(stmt)
