@@ -28,7 +28,7 @@
 
 ## 1. Project Overview
 
-**James Bot** is a multi-tenant Telegram reply assistant. It monitors a user's Telegram account in real-time, ingests conversation history, and uses an LLM (Claude or GPT-4) with RAG (retrieval-augmented generation) to ghostwrite replies that match the user's writing style.
+**James Bot** is a multi-tenant Telegram reply assistant. It monitors a user's Telegram account in real-time, ingests conversation history, and uses an LLM (Claude, GPT-4.1, or local Ollama models) with RAG (retrieval-augmented generation) to ghostwrite replies that match the user's writing style.
 
 ### Core User Journey
 
@@ -46,6 +46,7 @@
 - **Style analysis**: Claude analyzes the user's writing style per contact, stored as a prose profile
 - **Multi-user isolation**: Each user's data, embeddings, Redis channels, and Telegram session are fully isolated
 - **Scope-aware queries**: AI queries can be scoped to all chats, DMs only, groups only, specific contacts, or Telegram folder groups
+- **Local AI mode**: Users can run LLM + embeddings fully local via Ollama (offline-ish processing, no cloud API cost for local operations)
 - **Cost tracking**: Every LLM and embedding API call is logged with token counts and USD cost
 
 ---
@@ -94,7 +95,8 @@ TG-reply-bot/
 │       │   ├── llm.py          # LLM abstraction + prompt templates
 │       │   ├── response_generator.py  # Full RAG pipeline
 │       │   ├── retrieval.py    # pgvector similarity search
-│       │   ├── embedding.py    # OpenAI/Voyage AI wrapper
+│       │   ├── embedding.py    # OpenAI/Voyage/Ollama embedding routing
+│       │   ├── ollama.py       # Ollama client (health/models/chat/embed)
 │       │   ├── ingestion.py    # 5-step ingest pipeline
 │       │   ├── message_consumer.py   # Redis subscriber → process live messages
 │       │   ├── style_analyzer.py     # Per-contact style profile generation
@@ -166,7 +168,7 @@ TG-reply-bot/
 │   └── railway-hosting-runbook_4ac46f51.plan.md
 │
 ├── .env.example                # Required env vars with descriptions
-├── docker-compose.yml          # 5-service local stack
+├── docker-compose.yml          # 6-service local stack (optional Ollama profile)
 └── README.md
 ```
 
@@ -182,10 +184,12 @@ TG-reply-bot/
 | Database | PostgreSQL 16 + pgvector | Vector similarity via `<=>` cosine operator |
 | Migrations | Alembic | Run at startup via `entrypoint.sh` |
 | Cache / Pub-Sub | Redis 7 (hiredis) | Sessions, pub/sub, pause flags |
-| LLM – primary | Anthropic Claude | Default: `claude-sonnet-4-20250514` |
-| LLM – secondary | OpenAI GPT-4.1 | User-selectable in settings |
-| Embeddings – primary | OpenAI `text-embedding-3-small` | 512 dimensions |
-| Embeddings – fallback | Voyage AI `voyage-4-lite` | 512 dimensions |
+| LLM – cloud primary | Anthropic Claude | Default cloud model: `claude-sonnet-4-20250514` |
+| LLM – cloud secondary | OpenAI GPT-4.1 | User-selectable in settings |
+| LLM – local | Ollama (`llama3.2`, `gemma3:4b`, etc.) | Dynamically discovered from `/api/tags` |
+| Embeddings – cloud primary | OpenAI `text-embedding-3-small` | 512 dimensions |
+| Embeddings – cloud fallback | Voyage AI `voyage-4-lite` | 512 dimensions |
+| Embeddings – local | Ollama (`nomic-embed-text`, etc.) | Truncate/pad + L2 normalize to 512d |
 | Auth | bcrypt + python-jose JWT | ⚠ python-jose has CVEs, planned replacement with PyJWT |
 | Email | smtplib (blocking) | Password reset only; ⚠ blocking in async context |
 | Telegram parsing | telethon (in utils) | JSON export parser only |
@@ -241,6 +245,7 @@ TG-reply-bot/
 | `web` (frontend) | Next.js dashboard | 3000 |
 | `postgres` | Primary database with pgvector extension | 5432 |
 | `redis` | Pub/sub broker, session store, pause flags, cache | 6379 |
+| `ollama` (optional) | Local LLM + embedding runtime (profile `local-ai`) | 11434 |
 
 **Communication paths:**
 - Frontend → Backend: HTTP REST (`/api/*`) + WebSocket (`/ws`)
@@ -267,10 +272,11 @@ DATABASE_URL=postgresql://user:pass@host:5432/dbname
 # Cache / Pub-Sub
 REDIS_URL=redis://host:6379
 
-# LLM — at least one required
+# LLM / embeddings — cloud keys optional if using Ollama local mode
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...           # optional, enables GPT-4 models
 VOYAGEAI_API_KEY=pa-...         # optional, fallback embeddings
+OLLAMA_BASE_URL=http://localhost:11434   # optional (auto-detected in UI)
 
 # Auth
 JWT_SECRET=<random 32+ char string>
@@ -298,12 +304,13 @@ FROM_EMAIL=...
 
 ### docker-compose.yml (local development)
 
-Five services:
+Six services (one optional):
 - `postgres`: `pgvector/pgvector:pg16`, port 5432, persistent volume
 - `redis`: `redis:7-alpine`, port 6379
-- `api`: builds `backend/`, port 8000, mounts `.env`
+- `api`: builds `backend/`, port 8000, mounts `.env`, reaches host Ollama via `host.docker.internal`
 - `monitor`: builds `monitor/`, no exposed port, mounts `.env`
 - `web`: builds `frontend/`, port 3000, receives `NEXT_PUBLIC_*` as build args
+- `ollama` (optional): `ollama/ollama`, profile `local-ai`, port 11434
 
 ### Railway Deployment
 
@@ -354,6 +361,11 @@ settings.available_models = [
     "gpt-4.1-mini",
     "gpt-4.1"
 ]
+
+# Ollama runtime
+settings.ollama_base_url
+settings.ollama_timeout_seconds
+settings.ollama_keep_alive
 ```
 
 ### Database (`app/database.py`)
@@ -371,8 +383,8 @@ FastAPI dependencies injected into route handlers:
 |-----------|---------|-----|
 | `get_current_user` | `User` ORM object | Validates `Authorization: Bearer <jwt>` |
 | `get_redis` | `Redis` client | Singleton connection pool |
-| `get_user_settings` | `dict` | Merges `user.settings` JSON with defaults |
-| `get_user_llm_model` | `str` | Extracts validated model name from user settings |
+| `get_user_settings` | `dict` | Merges `user.settings` JSON with defaults (`llm_provider`, `embedding_provider`, `ollama_embedding_model`, etc.) |
+| `get_user_llm_model` | `str` | Extracts validated model from user settings (accepts dynamic Ollama model IDs when `llm_provider=ollama`) |
 
 ### Services
 
@@ -393,7 +405,10 @@ async def generate_response(
 ) -> str
 ```
 
-- Routes to `_call_anthropic()` or `_call_openai()` based on model prefix
+- Routes to Anthropic / OpenAI / Ollama via provider resolver:
+  - static model catalog for cloud models
+  - `user_settings["llm_provider"] == "ollama"` for dynamic local IDs
+  - prefix fallback (`claude*`, `gpt*`, else assume Ollama)
 - Records every call to `ApiUsage` table via `cost_tracker.record_usage()`
 - Raises `AIDisabledError` if `user_settings["ai_enabled"]` is `False`
 
@@ -419,7 +434,8 @@ async def generate_response(
 4. Recency-reranks conversation chunks (boost recent by 0.15)
 5. Estimates target reply length from conversation patterns
 6. Builds GHOSTWRITE prompts including style profile
-7. Calls `llm.generate_response()` → Claude/GPT
+7. Calls `llm.generate_response()` → Anthropic / OpenAI / Ollama
+   - Ghostwrite path caps generation budget at `max_tokens=512` to reduce local timeout risk
 8. Stores result as `ResponseSuggestion` with status `pending`
 9. Returns suggestion object
 
@@ -450,9 +466,15 @@ async def retrieve_chunks(
 
 #### `embedding.py` — Embedding Service
 
-- **Primary**: OpenAI `text-embedding-3-small`, 512 dimensions
-- **Fallback**: Voyage AI `voyage-4-lite`, 512 dimensions
-- Batches of 128 texts per API call
+- Provider routing based on `user_settings["embedding_provider"]`:
+  - `openai` (primary cloud)
+  - `voyageai` (cloud fallback)
+  - `ollama` (local embeddings)
+- Ollama embeddings are normalized for pgvector compatibility:
+  - truncate/pad vectors to 512 dimensions
+  - L2-normalize after truncation (Matryoshka-friendly path)
+- Ollama embedding batch size: 64 texts
+- Cloud embedding batches: 128 texts per API call
 - Exponential backoff retry: 5s → 10s → 20s → 40s → 60s on 429/5xx
 - All calls recorded to `ApiUsage`
 
@@ -490,7 +512,7 @@ For each incoming message:
    - `unresponded_count` incremented for incoming, cleared for outgoing **only if newest**
 5. If paused: skip steps 6–10, save message only
 6. If rechunk threshold met (5 new messages OR 60-second timer): `_rechunk_and_embed_contact()`
-7. If incoming DM + `auto_generate` pref enabled: `_auto_generate_suggestion()`
+7. If incoming DM + `auto_generate` pref enabled: `_auto_generate_suggestion()` using user-selected `llm_model`/`llm_provider`
 8. If `auto_draft` enabled: publish `telegram:send_commands:{user_id}` → Monitor saves draft
 9. Publish `suggestion_ready` event → `user:{user_id}:events` → WebSocket → frontend
 
@@ -513,6 +535,7 @@ Pricing per 1M tokens (as of Feb 2026):
 | Claude Opus 4 | $15.00 | $75.00 |
 | GPT-4.1 mini | $0.40 | $1.60 |
 | GPT-4.1 | $2.00 | $8.00 |
+| Ollama (local, any model) | $0.00 | $0.00 |
 | OpenAI text-embedding-3-small | $0.02/1M tokens | — |
 | Voyage voyage-4-lite | $0.02/1M tokens | — |
 
@@ -628,6 +651,9 @@ api.ingest.uploadTelegram(file)
 api.chat.query(params)
 api.settings.requestTelegramCode(phone)
 api.settings.verifyTelegramCode(phone, code, password)
+api.settings.ollamaStatus()
+api.settings.availableEmbeddings()
+api.settings.reembed()
 // ... etc
 ```
 
@@ -687,7 +713,11 @@ Events received via WebSocket from `user:{user_id}:events`:
 
 #### Settings (`/settings`)
 - Telegram OTP flow: enter phone → receive code → verify (optionally with 2FA password)
-- AI model selector (dropdown of `available_models`)
+- Local AI card: Ollama connectivity + model counts + install/pull hints
+- Local LLM model picker inside Local AI card
+- AI model selector grouped by provider (Local Ollama / Anthropic / OpenAI), only showing available providers
+- Embedding provider selector (OpenAI / Voyage / Ollama local) with availability gating
+- Re-embed confirmation flow when switching embedding provider
 - API key fields: Anthropic, OpenAI, Voyage AI
 - Validate-key button (calls `/api/settings/validate-api-key`)
 - Dashboard scope preference
@@ -1048,9 +1078,12 @@ All protected endpoints require: `Authorization: Bearer <jwt>`
 | POST | `/telegram/verify-code` | `{phone, code, password?}` | `{message}` |
 | GET | `/telegram/status` | — | `{connected, user_id, name}` |
 | POST | `/validate-api-key` | `{service, api_key}` | `{valid, error?}` |
-| GET | `/available-models` | — | `string[]` |
-| GET | `/ai-status` | — | `{enabled, model}` |
-| PUT | `/preferences` | `{ai_enabled?, llm_model?, auto_generate?, auto_draft?, show_urgency?, scope_type?}` | Updated prefs |
+| GET | `/ollama/status` | — | `{reachable, chat_models[], embedding_models[]}` |
+| GET | `/available-models` | — | `{models[], current, default}` filtered by key/local availability |
+| GET | `/available-embeddings` | — | `{providers[], current}` |
+| GET | `/ai-status` | — | `{ai_enabled, has_*_api_key, has_ollama, embedding_provider, active_llm_provider, ...}` |
+| PUT | `/preferences` | `{ai_enabled?, llm_model?, llm_provider?, embedding_provider?, ollama_embedding_model?, auto_generate?, auto_draft?, show_urgency?, scope_type?}` | Updated prefs (+`requires_reembed` when embedding provider changes) |
+| POST | `/reembed` | — | `{status, message, total?}` |
 | DELETE | `/delete-all-data` | — | `{message}` |
 
 ### Documents (`/api/documents`)
@@ -1177,7 +1210,7 @@ web service (build vars):
 ```bash
 # 1. Copy env template
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys (or use local Ollama)
 
 # 2. Start all services
 docker compose up --build
@@ -1186,6 +1219,22 @@ docker compose up --build
 # Backend API: http://localhost:8000
 # API docs: http://localhost:8000/docs
 ```
+
+### Local AI (Ollama) Options
+
+```bash
+# Option A: run Ollama on host machine (recommended for local dev)
+brew install ollama
+brew services start ollama
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# Option B: run Ollama in compose profile
+docker compose --profile local-ai up --build
+```
+
+When API runs in Docker and Ollama runs on host, backend uses:
+- `OLLAMA_BASE_URL=http://host.docker.internal:11434`
 
 ### Running Services Individually
 
@@ -1272,6 +1321,7 @@ See `docs/REFACTORING_PLAN.md` for the full Feb 2026 audit. Summary:
 | `datetime.utcnow()` deprecated | 12 occurrences across backend | Replace with `datetime.now(UTC)` |
 | Duplicated `get_or_create_contact` | `ingestion.py` + `message_consumer.py` | Extract to shared `contact_service.py` |
 | Unbounded in-memory caches | `llm.py`, `api/settings.py`, `services/message_consumer.py` | Add max size or TTL |
+| Local LLM timeout spikes on cold models | `services/ollama.py`, `api/suggestions.py` | Mitigated with configurable timeout (`ollama_timeout_seconds`), keep-alive (`ollama_keep_alive`), smaller ghostwrite token budget, and 504 error surfacing |
 
 ### Completed Work
 

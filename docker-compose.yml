@@ -33,6 +33,11 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/james_bot
       REDIS_URL: redis://redis:6379
+      # In Docker, localhost points to the container itself.
+      # Default to host Ollama, override with OLLAMA_BASE_URL if needed.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,5 +70,19 @@ services:
     depends_on:
       - api
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles: ["local-ai"]
+
 volumes:
   pgdata:
+  ollama_data:

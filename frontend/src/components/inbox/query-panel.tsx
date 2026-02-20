@@ -11,6 +11,7 @@ import type {
   QueryResponse,
   SourceChunk,
   ChatSuggestionsResponse,
+  TelegramFolder,
 } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +38,8 @@ interface ChatMessage {
   sources?: SourceChunk[];
 }
 
+type QueryScopeType = "all" | "dms" | "groups" | "custom";
+
 const DEFAULT_SUGGESTIONS = [
   "Summarize this conversation",
   "What are the open questions?",
@@ -59,8 +62,10 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
   const [loading, setLoading] = useState(false);
 
   // Scope state
-  const [scopeContactId, setScopeContactId] = useState<string | null>(null);
-  const [scopeEnabled, setScopeEnabled] = useState(true);
+  const [scopeType, setScopeType] = useState<QueryScopeType>("all");
+  const [scopeContactIds, setScopeContactIds] = useState<string[]>([]);
+  const [scopeContactsById, setScopeContactsById] = useState<Record<string, Contact>>({});
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
   const [scopeSearchOpen, setScopeSearchOpen] = useState(false);
   const [scopeSearchQuery, setScopeSearchQuery] = useState("");
   const scopeSearchRef = useRef<HTMLInputElement>(null);
@@ -68,8 +73,8 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
   // Sync scope with route param when it changes
   useEffect(() => {
     if (contactId) {
-      setScopeContactId(contactId);
-      setScopeEnabled(true);
+      setScopeType("custom");
+      setScopeContactIds([contactId]);
     }
   }, [contactId]);
 
@@ -77,11 +82,12 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Fetch contact name when scoped
+  // Fetch primary contact (for route-scoped fallback)
+  const primaryScopeId = scopeContactIds[0] ?? null;
   const { data: contactData } = useQuery({
-    queryKey: ["contact-info", scopeContactId],
-    queryFn: () => api.contacts.get(scopeContactId!) as Promise<Contact>,
-    enabled: !!scopeContactId,
+    queryKey: ["contact-info", primaryScopeId],
+    queryFn: () => api.contacts.get(primaryScopeId!) as Promise<Contact>,
+    enabled: !!primaryScopeId,
     staleTime: 60_000,
   });
 
@@ -97,8 +103,37 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
     staleTime: 10_000,
   });
 
-  const contactName = contactData?.display_name ?? null;
-  const effectiveScopeId = scopeContactId && scopeEnabled ? scopeContactId : undefined;
+  const { data: telegramFoldersData } = useQuery({
+    queryKey: ["telegram-folders"],
+    queryFn: () =>
+      api.chat.folders() as Promise<{ folders: TelegramFolder[] }>,
+    staleTime: 60_000,
+  });
+
+  useEffect(() => {
+    if (contactData?.id) {
+      setScopeContactsById((prev) => ({ ...prev, [contactData.id]: contactData }));
+    }
+  }, [contactData]);
+
+  useEffect(() => {
+    const contacts = scopeSearchResults?.contacts ?? [];
+    if (!contacts.length) return;
+    setScopeContactsById((prev) => {
+      const next = { ...prev };
+      contacts.forEach((c) => {
+        next[c.id] = c;
+      });
+      return next;
+    });
+  }, [scopeSearchResults]);
+
+  const effectiveScopeType = scopeType;
+  const effectiveScopeIds = scopeType === "custom" ? scopeContactIds : [];
+  const effectiveFolderId =
+    scopeType === "custom" && selectedFolderId !== null ? selectedFolderId : undefined;
+  const selectedFolder =
+    telegramFoldersData?.folders?.find((f) => f.folder_id === selectedFolderId) ?? null;
 
   // Fetch personalized suggestions
   useEffect(() => {
@@ -142,7 +177,11 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
     try {
       const res = (await api.chat.query(
         question,
-        effectiveScopeId,
+        {
+          scopeType: effectiveScopeType,
+          contactIds: effectiveScopeIds,
+          folderId: effectiveFolderId,
+        }
       )) as QueryResponse;
       setMessages((prev) => [
         ...prev,
@@ -162,16 +201,41 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
   };
 
   const handleScopeSelect = (contact: Contact) => {
-    setScopeContactId(contact.id);
-    setScopeEnabled(true);
-    setScopeSearchOpen(false);
-    setScopeSearchQuery("");
+    setScopeType("custom");
+    setSelectedFolderId(null);
+    setScopeContactsById((prev) => ({ ...prev, [contact.id]: contact }));
+    setScopeContactIds((prev) =>
+      prev.includes(contact.id) ? prev.filter((id) => id !== contact.id) : [...prev, contact.id]
+    );
   };
 
-  const handleScopeRemove = () => {
-    setScopeContactId(null);
-    setScopeEnabled(false);
+  const handleScopeChipRemove = (id: string) => {
+    setScopeContactIds((prev) => {
+      setSelectedFolderId(null);
+      const next = prev.filter((cid) => cid !== id);
+      if (!next.length) {
+        setScopeType("all");
+      }
+      return next;
+    });
+  };
+
+  const setPresetScope = (nextScope: QueryScopeType) => {
+    setScopeType(nextScope);
+    if (nextScope !== "custom") {
+      setScopeContactIds([]);
+      setSelectedFolderId(null);
+      setScopeSearchOpen(false);
+      setScopeSearchQuery("");
+    }
+  };
+
+  const applyTelegramFolderScope = (folder: TelegramFolder) => {
+    setScopeType("custom");
+    setSelectedFolderId(folder.folder_id);
+    setScopeContactIds(folder.contact_ids);
     setScopeSearchOpen(false);
+    setScopeSearchQuery("");
   };
 
   // ── Collapsed state ──
@@ -224,40 +288,114 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
 
       {/* Scope indicator — now with search */}
       <div className="border-b border-border-element px-3 py-1.5">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[11px] text-ink-tertiary shrink-0">Scope:</span>
-          <div className="flex items-center gap-1 flex-1 min-w-0 flex-wrap">
-            {scopeContactId && scopeEnabled ? (
-              <Badge
-                variant="outline"
-                className="text-[10px] gap-1 cursor-pointer"
-                onClick={() => {
-                  setScopeEnabled(false);
-                  setScopeContactId(null);
-                }}
-              >
-                <User className="h-2.5 w-2.5" strokeWidth={1.5} />
-                {contactName ?? "Loading..."}
-                <X className="h-2.5 w-2.5 ml-0.5" strokeWidth={1.5} />
-              </Badge>
-            ) : (
-              <Badge
-                variant="secondary"
-                className="text-[10px] gap-1"
-              >
-                All Chats
-              </Badge>
+          <button
+            onClick={() => setPresetScope("all")}
+            className={cn(
+              "text-[10px] px-1.5 py-0.5 border transition-colors",
+              scopeType === "all"
+                ? "border-primary text-primary bg-accent"
+                : "border-border-element text-ink-tertiary hover:text-ink-secondary"
             )}
-            <button
-              onClick={() => setScopeSearchOpen(!scopeSearchOpen)}
-              className="flex items-center gap-0.5 text-[10px] text-ink-tertiary hover:text-primary transition-colors px-1"
-              title="Search and add scope"
-            >
-              <Plus className="h-3 w-3" strokeWidth={1.5} />
-              <span>{scopeContactId && scopeEnabled ? "Change" : "Add"}</span>
-            </button>
-          </div>
+          >
+            All
+          </button>
+          <button
+            onClick={() => setPresetScope("dms")}
+            className={cn(
+              "text-[10px] px-1.5 py-0.5 border transition-colors",
+              scopeType === "dms"
+                ? "border-primary text-primary bg-accent"
+                : "border-border-element text-ink-tertiary hover:text-ink-secondary"
+            )}
+          >
+            DMs
+          </button>
+          <button
+            onClick={() => setPresetScope("groups")}
+            className={cn(
+              "text-[10px] px-1.5 py-0.5 border transition-colors",
+              scopeType === "groups"
+                ? "border-primary text-primary bg-accent"
+                : "border-border-element text-ink-tertiary hover:text-ink-secondary"
+            )}
+          >
+            Groups
+          </button>
+          <button
+            onClick={() => setScopeType("custom")}
+            className={cn(
+              "text-[10px] px-1.5 py-0.5 border transition-colors",
+              scopeType === "custom"
+                ? "border-primary text-primary bg-accent"
+                : "border-border-element text-ink-tertiary hover:text-ink-secondary"
+            )}
+          >
+            Folder
+          </button>
+          <button
+            onClick={() => {
+              setScopeType("custom");
+              setScopeSearchOpen(!scopeSearchOpen);
+            }}
+            className="ml-auto flex items-center gap-0.5 text-[10px] text-ink-tertiary hover:text-primary transition-colors px-1"
+            title="Search and add chats to folder scope"
+          >
+            <Plus className="h-3 w-3" strokeWidth={1.5} />
+            <span>{scopeType === "custom" ? "Add Chats" : "Open Folder"}</span>
+          </button>
         </div>
+
+        {scopeType === "custom" && (
+          <div className="mt-2 space-y-1.5">
+            {!!telegramFoldersData?.folders?.length && (
+              <div className="flex items-center gap-1 flex-wrap">
+                {telegramFoldersData.folders.map((f) => (
+                  <button
+                    key={f.folder_id}
+                    onClick={() => applyTelegramFolderScope(f)}
+                    className={cn(
+                      "text-[10px] px-1.5 py-0.5 border transition-colors",
+                      selectedFolderId === f.folder_id
+                        ? "border-primary text-primary bg-accent"
+                        : "border-border-element text-ink-tertiary hover:text-ink-secondary"
+                    )}
+                    title={`Use Telegram folder "${f.title}"`}
+                  >
+                    {f.emoticon ? `${f.emoticon} ` : ""}
+                    {f.title} ({f.chat_count})
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center gap-1 flex-wrap">
+              {scopeContactIds.length === 0 ? (
+                <Badge variant="secondary" className="text-[10px]">
+                  No chats selected
+                </Badge>
+              ) : (
+                scopeContactIds.map((id) => {
+                  const c = scopeContactsById[id];
+                  const label = c?.display_name ?? id.slice(0, 8);
+                  return (
+                    <Badge
+                      key={id}
+                      variant="outline"
+                      className="text-[10px] gap-1 cursor-pointer"
+                      onClick={() => handleScopeChipRemove(id)}
+                    >
+                      <User className="h-2.5 w-2.5" strokeWidth={1.5} />
+                      {label}
+                      <X className="h-2.5 w-2.5 ml-0.5" strokeWidth={1.5} />
+                    </Badge>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Scope search dropdown */}
         {scopeSearchOpen && (
@@ -276,27 +414,22 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
               }}
             />
             <div className="max-h-40 overflow-y-auto border border-border-element bg-surface-subtle">
-              {/* "All Chats" option */}
-              <button
-                onClick={handleScopeRemove}
-                className="flex items-center gap-2 w-full px-2 py-1.5 text-left text-xs text-ink-secondary hover:bg-surface-card transition-colors"
-              >
-                <Search className="h-3 w-3 text-ink-tertiary" strokeWidth={1.5} />
-                All Chats
-              </button>
               {(scopeSearchResults?.contacts ?? []).map((c) => (
                 <button
                   key={c.id}
                   onClick={() => handleScopeSelect(c)}
                   className={cn(
                     "flex items-center gap-2 w-full px-2 py-1.5 text-left text-xs hover:bg-surface-card transition-colors",
-                    c.id === scopeContactId ? "text-primary" : "text-ink-secondary"
+                    scopeContactIds.includes(c.id) ? "text-primary bg-accent/60" : "text-ink-secondary"
                   )}
                 >
                   <div className="flex h-5 w-5 shrink-0 items-center justify-center bg-accent text-primary text-[9px]">
                     {c.display_name.charAt(0).toUpperCase()}
                   </div>
                   <span className="truncate">{c.display_name}</span>
+                  <span className="text-[9px] text-ink-tertiary">
+                    {c.chat_type === "personal_chat" ? "DM" : "Group"}
+                  </span>
                   <span className="ml-auto text-[10px] text-ink-tertiary font-mono">{c.total_messages}</span>
                 </button>
               ))}
@@ -319,9 +452,22 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
             <p className="text-xs text-ink-secondary">
               Ask anything about your chat history
             </p>
-            {scopeContactId && scopeEnabled && contactName && (
+            {scopeType === "custom" && scopeContactIds.length > 0 && (
               <p className="mt-1 text-[11px] text-ink-tertiary">
-                Scoped to <span className="text-ink-secondary">{contactName}</span>
+                Scoped to{" "}
+                <span className="text-ink-secondary">
+                  {selectedFolder ? `${selectedFolder.title} (${scopeContactIds.length})` : `${scopeContactIds.length} chat${scopeContactIds.length > 1 ? "s" : ""}`}
+                </span>
+              </p>
+            )}
+            {scopeType === "dms" && (
+              <p className="mt-1 text-[11px] text-ink-tertiary">
+                Scoped to <span className="text-ink-secondary">DMs only</span>
+              </p>
+            )}
+            {scopeType === "groups" && (
+              <p className="mt-1 text-[11px] text-ink-tertiary">
+                Scoped to <span className="text-ink-secondary">Groups only</span>
               </p>
             )}
             <div className="mt-4 flex flex-col gap-1.5 w-full">
@@ -437,9 +583,13 @@ export function QueryPanel({ collapsed, onCollapse, width }: QueryPanelProps) {
       >
         <Input
           placeholder={
-            effectiveScopeId
-              ? `Ask about ${contactName ?? "this chat"}...`
-              : "Ask about all chats..."
+            scopeType === "custom"
+              ? "Ask about selected folder chats..."
+              : scopeType === "dms"
+                ? "Ask about DMs..."
+                : scopeType === "groups"
+                  ? "Ask about groups..."
+                  : "Ask about all chats..."
           }
           value={input}
           onChange={(e) => setInput(e.target.value)}

@@ -1,17 +1,22 @@
 """
-Settings routes — Telegram connection (OTP flow), user preferences.
+Settings routes — Telegram connection (OTP flow), user preferences,
+Ollama integration, embedding provider management.
 """
 
+import asyncio
+import json
 import logging
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from app.database import get_db
-from app.api.deps import get_current_user, get_redis
+from app.database import get_db, async_session
+from app.api.deps import get_current_user, get_redis, get_user_settings
 from app.models.user import User
 from app.config import get_settings
 
@@ -169,18 +174,119 @@ async def telegram_status(
     )
 
 
+@router.get("/ollama/status")
+async def ollama_status(user: User = Depends(get_current_user)):
+    """Check Ollama connectivity and list available models."""
+    from app.services.ollama import check_health, list_models
+
+    reachable = await check_health()
+    if not reachable:
+        logger.info(f"[SETTINGS] Ollama not reachable for {user.email}")
+        return {"reachable": False, "chat_models": [], "embedding_models": []}
+
+    models = await list_models()
+    logger.info(
+        f"[SETTINGS] Ollama status for {user.email}: "
+        f"{len(models['chat_models'])} chat, {len(models['embedding_models'])} embed"
+    )
+    return {"reachable": True, **models}
+
+
 @router.get("/available-models")
 async def get_available_models(
     user: User = Depends(get_current_user),
 ):
-    """Return available LLM models and the user's current selection."""
+    """Return available LLM models filtered by provider availability."""
     settings = get_settings()
     user_settings = user.settings or {}
     current_model = user_settings.get("llm_model", settings.anthropic_model)
+
+    has_anthropic = bool(user_settings.get("anthropic_api_key"))
+    has_openai = bool(user_settings.get("openai_api_key"))
+
+    filtered_models = []
+    for m in settings.available_models:
+        if m["provider"] == "anthropic" and has_anthropic:
+            filtered_models.append(m)
+        elif m["provider"] == "openai" and has_openai:
+            filtered_models.append(m)
+
+    from app.services.ollama import check_health, list_models
+
+    if await check_health():
+        ollama_models = (await list_models())["chat_models"]
+        for om in ollama_models:
+            filtered_models.append({
+                "id": om["id"],
+                "name": om["name"],
+                "description": f"Local model ({om.get('parameter_size', 'unknown')})",
+                "provider": "ollama",
+                "tier": "local",
+                "input_cost_per_m": 0.0,
+                "output_cost_per_m": 0.0,
+            })
+
+    logger.info(
+        f"[SETTINGS] Available models for {user.email}: "
+        f"{len(filtered_models)} (anthropic={has_anthropic}, openai={has_openai})"
+    )
     return {
-        "models": settings.available_models,
+        "models": filtered_models,
         "current": current_model,
         "default": settings.anthropic_model,
+    }
+
+
+@router.get("/available-embeddings")
+async def get_available_embeddings(user: User = Depends(get_current_user)):
+    """Return available embedding providers with availability status."""
+    user_settings = user.settings or {}
+
+    providers = []
+
+    has_openai = bool(user_settings.get("openai_api_key"))
+    providers.append({
+        "id": "openai",
+        "name": "OpenAI",
+        "model": "text-embedding-3-small",
+        "available": has_openai,
+        "cost": "$0.02 / 1M tokens",
+    })
+
+    has_voyage = bool(user_settings.get("voyageai_api_key"))
+    providers.append({
+        "id": "voyageai",
+        "name": "Voyage AI",
+        "model": "voyage-4-lite",
+        "available": has_voyage,
+        "cost": "$0.02 / 1M tokens",
+    })
+
+    from app.services.ollama import check_health, list_models
+
+    ollama_reachable = await check_health()
+    ollama_embed_models = (
+        (await list_models())["embedding_models"] if ollama_reachable else []
+    )
+    providers.append({
+        "id": "ollama",
+        "name": "Ollama (Local)",
+        "model": ollama_embed_models[0]["id"] if ollama_embed_models else "nomic-embed-text",
+        "available": ollama_reachable and len(ollama_embed_models) > 0,
+        "cost": "Free (local)",
+        "models": ollama_embed_models,
+    })
+
+    current_provider = user_settings.get("embedding_provider", "openai")
+    current_model = user_settings.get("ollama_embedding_model", "text-embedding-3-small")
+    if current_provider == "openai":
+        current_model = user_settings.get("openai_embedding_model") or "text-embedding-3-small"
+    elif current_provider == "voyageai":
+        current_model = user_settings.get("voyageai_embedding_model") or "voyage-4-lite"
+
+    return {
+        "providers": providers,
+        "current": {"provider": current_provider, "model": current_model},
     }
 
 
@@ -192,27 +298,62 @@ async def update_preferences(
 ):
     """Update user preferences/settings."""
     merged_settings = {**(user.settings or {}), **preferences}
+    old_settings = user.settings or {}
+    requires_reembed = False
 
-    # Validate model/provider selection against available catalog and keys.
+    # ── Validate LLM model selection ──
     if "llm_model" in preferences and preferences["llm_model"]:
         model_id = preferences["llm_model"]
         model_by_id = {m["id"]: m for m in get_settings().available_models}
         model_info = model_by_id.get(model_id)
-        if not model_info:
-            raise HTTPException(status_code=400, detail="Unsupported model selected")
-        provider = model_info.get("provider")
-        if provider == "anthropic" and not merged_settings.get("anthropic_api_key"):
-            raise HTTPException(
-                status_code=400,
-                detail="Set an Anthropic API key before selecting a Claude model",
-            )
-        if provider == "openai" and not merged_settings.get("openai_api_key"):
-            raise HTTPException(
-                status_code=400,
-                detail="Set an OpenAI API key before selecting an OpenAI model",
+
+        if model_info:
+            provider = model_info.get("provider")
+            if provider == "anthropic" and not merged_settings.get("anthropic_api_key"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set an Anthropic API key before selecting a Claude model",
+                )
+            if provider == "openai" and not merged_settings.get("openai_api_key"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set an OpenAI API key before selecting an OpenAI model",
+                )
+        else:
+            # Not in static catalog — must be an Ollama model
+            ollama_provider = merged_settings.get("llm_provider", preferences.get("llm_provider"))
+            if ollama_provider != "ollama":
+                raise HTTPException(status_code=400, detail="Unsupported model selected")
+            from app.services.ollama import check_health
+
+            if not await check_health():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ollama is not reachable. Start it with `ollama serve`.",
+                )
+
+    # ── Validate embedding provider change ──
+    if "embedding_provider" in preferences:
+        new_ep = preferences["embedding_provider"]
+        old_ep = old_settings.get("embedding_provider", "openai")
+
+        if new_ep == "ollama":
+            from app.services.ollama import check_health
+
+            if not await check_health():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ollama is not reachable. Start it with `ollama serve`.",
+                )
+
+        if new_ep != old_ep:
+            requires_reembed = True
+            logger.info(
+                f"[SETTINGS] Embedding provider changed from {old_ep} to {new_ep} "
+                f"for {user.email} — re-embed required"
             )
 
-    # Prevent removing a provider key that's required by current model.
+    # ── Prevent removing a provider key that's required by current model ──
     if (
         ("anthropic_api_key" in preferences and preferences.get("anthropic_api_key") is None)
         or ("openai_api_key" in preferences and preferences.get("openai_api_key") is None)
@@ -234,7 +375,11 @@ async def update_preferences(
     user.settings = merged_settings
     await db.commit()
     logger.info(f"[SETTINGS] Updated preferences for {user.email}")
-    return {"status": "updated", "settings": user.settings}
+    return {
+        "status": "updated",
+        "settings": user.settings,
+        "requires_reembed": requires_reembed,
+    }
 
 
 class ValidateApiKeyRequest(BaseModel):
@@ -308,6 +453,7 @@ async def get_ai_status(
     user_settings = user.settings or {}
     has_anthropic_key = bool(user_settings.get("anthropic_api_key"))
     has_openai_key = bool(user_settings.get("openai_api_key"))
+    has_voyage_key = bool(user_settings.get("voyageai_api_key"))
     active_model = user_settings.get("llm_model")
     model_by_id = {m["id"]: m for m in get_settings().available_models}
     active_provider = (
@@ -315,19 +461,198 @@ async def get_ai_status(
         if active_model
         else None
     )
+    if not active_provider and user_settings.get("llm_provider") == "ollama":
+        active_provider = "ollama"
+
+    from app.services.ollama import check_health, list_models
+
+    ollama_reachable = await check_health()
+    ollama_embed_count = 0
+    ollama_chat_count = 0
+    if ollama_reachable:
+        models = await list_models()
+        ollama_chat_count = len(models["chat_models"])
+        ollama_embed_count = len(models["embedding_models"])
+
+    embedding_provider = user_settings.get("embedding_provider", "openai")
+
     return {
         "ai_enabled": user_settings.get("ai_enabled", True),
         "has_custom_api_key": has_anthropic_key or has_openai_key,
         "has_anthropic_api_key": has_anthropic_key,
         "has_openai_api_key": has_openai_key,
-        "can_use_embeddings": has_openai_key or bool(user_settings.get("voyageai_api_key")),
+        "can_use_embeddings": (
+            has_openai_key
+            or has_voyage_key
+            or (ollama_reachable and ollama_embed_count > 0)
+        ),
         "active_llm_provider": active_provider,
+        "has_ollama": ollama_reachable,
+        "ollama_model_count": ollama_chat_count,
+        "embedding_provider": embedding_provider,
     }
+
+
+@router.post("/reembed")
+async def reembed_all_data(
+    db: AsyncSession = Depends(get_db),
+    redis_client=Depends(get_redis),
+    user: User = Depends(get_current_user),
+):
+    """Re-embed all conversation and document chunks with the current embedding provider."""
+    from app.models.chunk import ConversationChunk, DocumentChunk
+
+    us = get_user_settings(user)
+    provider = us.get("embedding_provider", "openai")
+    logger.info(f"[REEMBED] Requested by {user.email}, provider={provider}")
+
+    conv_count = (
+        await db.execute(
+            select(func.count()).select_from(ConversationChunk).where(
+                ConversationChunk.user_id == user.id
+            )
+        )
+    ).scalar() or 0
+    doc_count = (
+        await db.execute(
+            select(func.count()).select_from(DocumentChunk).where(
+                DocumentChunk.user_id == user.id
+            )
+        )
+    ).scalar() or 0
+    total = conv_count + doc_count
+
+    if total == 0:
+        return {"status": "skipped", "message": "No chunks to re-embed", "total": 0}
+
+    asyncio.create_task(
+        _reembed_user_chunks(
+            user_id=user.id,
+            user_email=user.email,
+            user_settings=us,
+            redis_client=redis_client,
+            total_chunks=total,
+        )
+    )
+
+    return {
+        "status": "started",
+        "message": f"Re-embedding {total} chunks in the background",
+        "total": total,
+    }
+
+
+async def _reembed_user_chunks(
+    user_id: uuid.UUID,
+    user_email: str,
+    user_settings: dict,
+    redis_client,
+    total_chunks: int,
+) -> None:
+    """Background task: re-embed all chunks for a user with their current provider."""
+    from app.models.chunk import ConversationChunk, DocumentChunk
+    from app.services.embedding import embed_texts
+
+    BATCH = 16
+    processed = 0
+    failures = 0
+    user_id_str = str(user_id)
+
+    logger.info(f"[REEMBED] Starting for {user_email}: {total_chunks} chunks")
+
+    try:
+        async with async_session() as db:
+            # Re-embed conversation chunks
+            conv_chunks = (
+                await db.execute(
+                    select(ConversationChunk).where(
+                        ConversationChunk.user_id == user_id
+                    )
+                )
+            ).scalars().all()
+
+            for i in range(0, len(conv_chunks), BATCH):
+                batch = conv_chunks[i : i + BATCH]
+                texts = [c.chunk_text for c in batch]
+                try:
+                    embeddings = await embed_texts(
+                        texts,
+                        input_type="document",
+                        user_id=user_id,
+                        operation="reembed",
+                        user_settings=user_settings,
+                    )
+                    for chunk, emb in zip(batch, embeddings):
+                        chunk.embedding = emb
+                    await db.commit()
+                    processed += len(batch)
+                except Exception as exc:
+                    failures += len(batch)
+                    logger.error(f"[REEMBED] Conv batch {i} failed: {exc}")
+                    await db.rollback()
+
+                await redis_client.publish(
+                    f"user:{user_id_str}:events",
+                    json.dumps({
+                        "type": "reembed_progress",
+                        "data": {"processed": processed, "total": total_chunks, "failures": failures},
+                    }),
+                )
+
+            # Re-embed document chunks
+            doc_chunks = (
+                await db.execute(
+                    select(DocumentChunk).where(DocumentChunk.user_id == user_id)
+                )
+            ).scalars().all()
+
+            for i in range(0, len(doc_chunks), BATCH):
+                batch = doc_chunks[i : i + BATCH]
+                texts = [c.chunk_text for c in batch]
+                try:
+                    embeddings = await embed_texts(
+                        texts,
+                        input_type="document",
+                        user_id=user_id,
+                        operation="reembed",
+                        user_settings=user_settings,
+                    )
+                    for chunk, emb in zip(batch, embeddings):
+                        chunk.embedding = emb
+                    await db.commit()
+                    processed += len(batch)
+                except Exception as exc:
+                    failures += len(batch)
+                    logger.error(f"[REEMBED] Doc batch {i} failed: {exc}")
+                    await db.rollback()
+
+                await redis_client.publish(
+                    f"user:{user_id_str}:events",
+                    json.dumps({
+                        "type": "reembed_progress",
+                        "data": {"processed": processed, "total": total_chunks, "failures": failures},
+                    }),
+                )
+
+    except Exception as exc:
+        logger.error(f"[REEMBED] Fatal error for {user_email}: {exc}")
+
+    logger.info(
+        f"[REEMBED] Completed for {user_email}: "
+        f"{processed}/{total_chunks} chunks, {failures} failures"
+    )
+    await redis_client.publish(
+        f"user:{user_id_str}:events",
+        json.dumps({
+            "type": "reembed_complete",
+            "data": {"processed": processed, "total": total_chunks, "failures": failures},
+        }),
+    )
 
 
 class DeleteDataRequest(BaseModel):
     confirm: bool
-    keep_account: bool = True  # If False, also deletes the user account
+    keep_account: bool = True
 
 
 @router.delete("/delete-all-data")

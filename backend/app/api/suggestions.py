@@ -90,15 +90,19 @@ async def generate_suggestion(
         ),
     )
 
-    suggestion = await generate_reply(
-        db=db,
-        user_id=user.id,
-        contact_id=contact_id,
-        user_name=user.name,
-        user_instruction=req.user_instruction,
-        model=get_user_llm_model(user),
-        user_settings=get_user_settings(user),
-    )
+    try:
+        suggestion = await generate_reply(
+            db=db,
+            user_id=user.id,
+            contact_id=contact_id,
+            user_name=user.name,
+            user_instruction=req.user_instruction,
+            model=get_user_llm_model(user),
+            user_settings=get_user_settings(user),
+        )
+    except RuntimeError as exc:
+        logger.warning(f"[SUGGEST] Local generation timeout/error for {contact.display_name}: {exc}")
+        raise HTTPException(status_code=504, detail=str(exc))
 
     # Notify via WebSocket
     await redis_client.publish(

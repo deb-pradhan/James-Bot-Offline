@@ -235,12 +235,36 @@ export const api = {
 
   // ── Chat/Query ──
   chat: {
-    query: (question: string, contactId?: string) =>
+    query: (
+      question: string,
+      opts?: {
+        contactId?: string;
+        scopeType?: "all" | "dms" | "groups" | "custom";
+        contactIds?: string[];
+        folderId?: number;
+      }
+    ) =>
       request("/api/chat/query", {
         method: "POST",
-        body: JSON.stringify({ question, contact_id: contactId }),
+        body: JSON.stringify({
+          question,
+          contact_id: opts?.contactId,
+          scope_type: opts?.scopeType ?? "all",
+          contact_ids: opts?.contactIds ?? [],
+          folder_id: opts?.folderId,
+        }),
       }),
     suggestions: () => request("/api/chat/suggestions"),
+    folders: () =>
+      request<{
+        folders: Array<{
+          folder_id: number;
+          title: string;
+          emoticon?: string | null;
+          contact_ids: string[];
+          chat_count: number;
+        }>;
+      }>("/api/chat/folders"),
   },
 
   // ── Documents ──
@@ -284,7 +308,7 @@ export const api = {
           id: string;
           name: string;
           description: string;
-          provider: "anthropic" | "openai";
+          provider: "anthropic" | "openai" | "ollama";
           tier: string;
           input_cost_per_m: number;
           output_cost_per_m: number;
@@ -304,8 +328,46 @@ export const api = {
         has_anthropic_api_key: boolean;
         has_openai_api_key: boolean;
         can_use_embeddings: boolean;
-        active_llm_provider: "anthropic" | "openai" | null;
+        active_llm_provider: "anthropic" | "openai" | "ollama" | null;
+        has_ollama: boolean;
+        ollama_model_count: number;
+        embedding_provider: "openai" | "voyageai" | "ollama";
       }>("/api/settings/ai-status"),
+    ollamaStatus: () =>
+      request<{
+        reachable: boolean;
+        chat_models: Array<{
+          id: string;
+          name: string;
+          size: number;
+          family: string;
+          parameter_size: string;
+        }>;
+        embedding_models: Array<{
+          id: string;
+          name: string;
+          size: number;
+          family: string;
+          parameter_size: string;
+        }>;
+      }>("/api/settings/ollama/status"),
+    availableEmbeddings: () =>
+      request<{
+        providers: Array<{
+          id: "openai" | "voyageai" | "ollama";
+          name: string;
+          model: string;
+          available: boolean;
+          cost: string;
+          models?: Array<{ id: string; name: string }>;
+        }>;
+        current: { provider: string; model: string };
+      }>("/api/settings/available-embeddings"),
+    reembed: () =>
+      request<{ status: string; message: string; total?: number }>(
+        "/api/settings/reembed",
+        { method: "POST" }
+      ),
     deleteAllData: (options: { confirm: boolean; keepAccount?: boolean }) =>
       request<{ status: string; message: string }>("/api/settings/delete-all-data", {
         method: "DELETE",

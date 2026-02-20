@@ -63,6 +63,8 @@ PRICING = {
     },
 }
 
+OLLAMA_PRICING = {"input": 0.0, "output": 0.0}
+
 # Fallback pricing if model not found (conservative overestimate)
 FALLBACK_PRICING = {"input": 5.00, "output": 15.00}
 
@@ -74,12 +76,16 @@ def calculate_cost(
     output_tokens: int,
 ) -> float:
     """Calculate cost in USD for given token usage."""
-    rates = PRICING.get((service, model), FALLBACK_PRICING)
+    rates = PRICING.get((service, model))
+    if rates is None and service == "ollama":
+        rates = OLLAMA_PRICING
+    if rates is None:
+        rates = FALLBACK_PRICING
     cost = (
         (input_tokens / 1_000_000) * rates["input"]
         + (output_tokens / 1_000_000) * rates["output"]
     )
-    return round(cost, 8)  # Keep precision for small amounts
+    return round(cost, 8)
 
 
 async def record_llm_usage(

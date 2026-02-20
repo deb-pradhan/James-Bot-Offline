@@ -36,15 +36,36 @@ def get_anthropic_client(custom_api_key: str) -> AsyncAnthropic:
     return _custom_clients[custom_api_key]
 
 
-def _resolve_provider(model: str) -> str:
+def _resolve_provider(model: str, user_settings: dict | None = None) -> str:
     model_by_id = {m["id"]: m for m in settings.available_models}
     model_info = model_by_id.get(model, {})
     provider = model_info.get("provider")
     if provider in {"anthropic", "openai"}:
         return provider
 
-    # Fallback for unknown custom model IDs.
-    return "anthropic" if model.startswith("claude") else "openai"
+    if user_settings and user_settings.get("llm_provider") == "ollama":
+        return "ollama"
+
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gpt"):
+        return "openai"
+
+    return "ollama"
+
+
+async def _call_ollama(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    temperature: float,
+) -> tuple[str, int, int]:
+    """Route LLM call to local Ollama instance."""
+    from app.services.ollama import generate_chat
+
+    logger.info(f"[LLM] Routing to Ollama, model={model}")
+    return await generate_chat(model, system_prompt, user_prompt, max_tokens, temperature)
 
 
 def _extract_text_from_openai_response(payload: dict) -> str:
@@ -92,10 +113,10 @@ async def generate_response(
     check_ai_enabled(user_settings)
 
     active_model = model or settings.anthropic_model
-    provider = _resolve_provider(active_model)
+    provider = _resolve_provider(active_model, user_settings)
 
     logger.info(
-        f"[LLM] Generating response, model={active_model}, "
+        f"[LLM] Generating response, model={active_model}, provider={provider}, "
         f"max_tokens={max_tokens}, temp={temperature}"
     )
 
@@ -112,6 +133,10 @@ async def generate_response(
         response_text = message.content[0].text
         tokens_in = message.usage.input_tokens
         tokens_out = message.usage.output_tokens
+    elif provider == "ollama":
+        response_text, tokens_in, tokens_out = await _call_ollama(
+            active_model, system_prompt, user_prompt, max_tokens, temperature
+        )
     else:
         openai_key = user_settings.get("openai_api_key") if user_settings else None
         if not openai_key:
@@ -187,7 +212,10 @@ Your task is to write a response that perfectly mimics {user_name}'s communicati
 3. Reference past conversations naturally when relevant — don't force it
 4. Never reveal you are an AI — you ARE {user_name}
 5. If you need info you don't have, write a natural response {user_name} might send (ask for clarification, say you'll check, etc.)
-6. Match the language/dialect {user_name} uses with this person"""
+6. Match the language/dialect {user_name} uses with this person
+7. Optimize for Telegram efficiency: start with the direct answer, then key detail, then clear next step/question
+8. Prefer high signal text: no filler, no meta-explanations, no restating obvious context
+9. If multiple questions exist, resolve the most recent and critical one first"""
 
 GHOSTWRITE_USER = """## Recent Conversation (newest last):
 {recent_messages}

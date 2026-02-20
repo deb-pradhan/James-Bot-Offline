@@ -140,6 +140,14 @@ export interface ChatSuggestionsResponse {
   personalized: boolean;
 }
 
+export interface TelegramFolder {
+  folder_id: number;
+  title: string;
+  emoticon?: string | null;
+  contact_ids: string[];
+  chat_count: number;
+}
+
 export interface SourceChunk {
   contact_name?: string | null;
   document_name?: string | null;
@@ -201,6 +209,46 @@ export interface IngestionHistoryItem {
 export interface IngestionHistoryResponse {
   items: IngestionHistoryItem[];
   total: number;
+}
+
+// ── Ollama ──
+export interface OllamaStatus {
+  reachable: boolean;
+  chat_models: OllamaModel[];
+  embedding_models: OllamaModel[];
+}
+
+export interface OllamaModel {
+  id: string;
+  name: string;
+  size: number;
+  family: string;
+  parameter_size: string;
+}
+
+// ── Embedding Provider ──
+export interface EmbeddingProvider {
+  id: "openai" | "voyageai" | "ollama";
+  name: string;
+  model: string;
+  available: boolean;
+  cost: string;
+  models?: OllamaModel[];
+}
+
+export interface AvailableEmbeddingsResponse {
+  providers: EmbeddingProvider[];
+  current: { provider: string; model: string };
+}
+
+export interface LLMModel {
+  id: string;
+  name: string;
+  description: string;
+  provider: "anthropic" | "openai" | "ollama";
+  tier: string;
+  input_cost_per_m: number;
+  output_cost_per_m: number;
 }
 
 // ── WebSocket Events ──

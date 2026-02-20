@@ -145,6 +145,20 @@ async def _embed_voyage(
         return embeddings, tokens
 
 
+async def _embed_ollama(
+    texts: list[str],
+    input_type: str,
+    *,
+    model: str,
+    dimension: int = 512,
+) -> tuple[list[list[float]], int]:
+    """Ollama local embeddings. Truncates + L2-normalizes to target dimension."""
+    from app.services.ollama import generate_embeddings
+
+    logger.info(f"[EMBED] Routing to Ollama, model={model}, dim={dimension}")
+    return await generate_embeddings(model, texts, target_dimension=dimension)
+
+
 async def embed_texts(
     texts: list[str],
     input_type: str = "document",
@@ -154,7 +168,9 @@ async def embed_texts(
     user_settings: dict | None = None,
 ) -> list[list[float]]:
     """
-    Embed texts using OpenAI (primary) with Voyage AI fallback.
+    Embed texts using the user's selected provider.
+
+    Provider priority: user setting → OpenAI (primary) → Voyage AI (fallback).
 
     Args:
         texts: List of strings to embed
@@ -169,6 +185,37 @@ async def embed_texts(
         return []
 
     active_settings = user_settings or {}
+    embedding_provider = active_settings.get("embedding_provider", "openai")
+
+    # ── Ollama local embeddings ──
+    if embedding_provider == "ollama":
+        ollama_model = active_settings.get("ollama_embedding_model") or "nomic-embed-text"
+        logger.info(f"[EMBED] Using Ollama provider, model={ollama_model}")
+        all_embeddings: list[list[float]] = []
+        total_tokens = 0
+        for i in range(0, len(texts), 64):
+            batch = texts[i : i + 64]
+            embeddings, tokens = await _embed_ollama(
+                batch, input_type,
+                model=ollama_model,
+                dimension=settings.embedding_dimension,
+            )
+            all_embeddings.extend(embeddings)
+            total_tokens += tokens
+
+        if user_id and operation:
+            from app.services.cost_tracker import record_embedding_usage
+
+            await record_embedding_usage(
+                user_id=user_id,
+                provider="ollama",
+                model=ollama_model,
+                total_tokens=total_tokens,
+                operation=operation,
+            )
+        return all_embeddings
+
+    # ── Cloud embeddings (OpenAI primary, Voyage fallback) ──
     openai_key = active_settings.get("openai_api_key")
     voyage_key = active_settings.get("voyageai_api_key")
     openai_model = (
@@ -183,7 +230,8 @@ async def embed_texts(
     if not openai_key and not voyage_key:
         raise ValueError(
             "No embedding API key configured for this user. "
-            "Set `openai_api_key` (or `voyageai_api_key`) in settings."
+            "Set `openai_api_key` (or `voyageai_api_key`) in settings, "
+            "or select Ollama for local embeddings."
         )
 
     all_embeddings: list[list[float]] = []

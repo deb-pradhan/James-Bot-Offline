@@ -63,6 +63,8 @@ def get_user_llm_model(user: User) -> str | None:
         valid_ids = [m["id"] for m in settings.available_models]
         if model in valid_ids:
             return model
+        if user_settings.get("llm_provider") == "ollama":
+            return model
     return None
 
 
@@ -71,10 +73,13 @@ def get_user_settings(user: User) -> dict:
     defaults = {
         "ai_enabled": True,
         "llm_model": None,
+        "llm_provider": None,
         "anthropic_api_key": None,
         "openai_api_key": None,
         "voyageai_api_key": None,
         "openai_embedding_model": None,
         "voyageai_embedding_model": None,
+        "embedding_provider": "openai",
+        "ollama_embedding_model": None,
     }
     return {**defaults, **(user.settings or {})}

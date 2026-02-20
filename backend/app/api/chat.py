@@ -16,6 +16,8 @@ from app.schemas.chat import (
     QueryResponse,
     SourceChunk,
     ChatSuggestionsResponse,
+    TelegramFolder,
+    TelegramFoldersResponse,
 )
 from app.services.response_generator import query_chat_history
 
@@ -149,12 +151,67 @@ async def query_history(
 
     contact_id = uuid.UUID(req.contact_id) if req.contact_id else None
 
+    scope_type = (req.scope_type or "all").lower().strip()
+    if scope_type not in {"all", "dms", "groups", "custom"}:
+        scope_type = "all"
+
+    # Backward compatibility: if contact_id is passed, force custom scope.
+    scope_contact_ids: list[uuid.UUID] = []
+    if contact_id:
+        scope_type = "custom"
+        scope_contact_ids = [contact_id]
+    elif scope_type == "custom" and req.contact_ids:
+        parsed_ids: list[uuid.UUID] = []
+        for cid in req.contact_ids:
+            try:
+                parsed_ids.append(uuid.UUID(cid))
+            except ValueError:
+                continue
+        scope_contact_ids = parsed_ids
+
+    # Telegram folder selection overrides ad-hoc custom selection.
+    if req.folder_id is not None:
+        stored_folders = (user.settings or {}).get("telegram_folders", [])
+        selected_folder = None
+        for f in stored_folders:
+            if int(f.get("folder_id", -1)) == int(req.folder_id):
+                selected_folder = f
+                break
+
+        if selected_folder:
+            peer_ids = [str(pid) for pid in selected_folder.get("include_peer_ids", [])]
+            if peer_ids:
+                folder_stmt = select(Contact.id).where(
+                    Contact.user_id == user.id,
+                    Contact.telegram_id.in_(peer_ids),
+                )
+                folder_result = await db.execute(folder_stmt)
+                folder_contact_ids = [row[0] for row in folder_result.all()]
+                scope_contact_ids = folder_contact_ids
+                scope_type = "custom"
+                contact_id = None
+
+    # Security: ensure scoped contacts belong to the current user.
+    if scope_contact_ids:
+        scoped_stmt = select(Contact.id).where(
+            Contact.user_id == user.id,
+            Contact.id.in_(scope_contact_ids),
+        )
+        scoped_result = await db.execute(scoped_stmt)
+        owned_ids = {row[0] for row in scoped_result.all()}
+        scope_contact_ids = [cid for cid in scope_contact_ids if cid in owned_ids]
+
+        if scope_type == "custom" and not scope_contact_ids:
+            scope_type = "all"
+
     result = await query_chat_history(
         db=db,
         user_id=user.id,
         question=req.question,
         user_name=user.name,
         contact_id=contact_id,
+        scope_type=scope_type,
+        contact_ids=scope_contact_ids,
         model=get_user_llm_model(user),
         user_settings=get_user_settings(user),
     )
@@ -172,3 +229,39 @@ async def query_history(
             for s in result["sources"]
         ],
     )
+
+
+@router.get("/folders", response_model=TelegramFoldersResponse)
+async def get_telegram_folders(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return Telegram-native folders resolved to local contact ids."""
+    stored_folders = (user.settings or {}).get("telegram_folders", [])
+    if not stored_folders:
+        return TelegramFoldersResponse(folders=[])
+
+    # Build map from telegram_id -> local contact_id
+    contacts_stmt = select(Contact.id, Contact.telegram_id).where(Contact.user_id == user.id)
+    contacts_result = await db.execute(contacts_stmt)
+    tg_to_local: dict[str, str] = {
+        str(row[1]): str(row[0]) for row in contacts_result.all()
+    }
+
+    folders: list[TelegramFolder] = []
+    for folder in stored_folders:
+        peer_ids = [str(pid) for pid in folder.get("include_peer_ids", [])]
+        resolved_contact_ids = [tg_to_local[pid] for pid in peer_ids if pid in tg_to_local]
+
+        folders.append(
+            TelegramFolder(
+                folder_id=int(folder.get("folder_id", 0)),
+                title=str(folder.get("title", "Folder")),
+                emoticon=folder.get("emoticon"),
+                contact_ids=resolved_contact_ids,
+                chat_count=len(resolved_contact_ids),
+            )
+        )
+
+    folders.sort(key=lambda f: f.title.lower())
+    return TelegramFoldersResponse(folders=folders)

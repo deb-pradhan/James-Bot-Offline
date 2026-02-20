@@ -316,13 +316,14 @@ async def _auto_generate_suggestion(
             logger.info(f"[CONSUMER] Auto-generating suggestion for {contact_name}...")
 
             from app.services.response_generator import generate_reply
-            from app.api.deps import get_user_settings
+            from app.api.deps import get_user_settings, get_user_llm_model
 
             suggestion = await generate_reply(
                 db=db,
                 user_id=user_id,
                 contact_id=contact_id,
                 user_name=user.name,
+                model=get_user_llm_model(user),
                 user_settings=get_user_settings(user),
             )
 

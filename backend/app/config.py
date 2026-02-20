@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     voyageai_embedding_model: str = "voyage-4-lite"
     embedding_dimension: int = 512
 
+    # Ollama (local LLM / embeddings)
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_timeout_seconds: float = 300.0
+    ollama_keep_alive: str = "30m"
+
     # Telegram (for in-app auth flow)
     telegram_api_id: int = 0
     telegram_api_hash: str = ""

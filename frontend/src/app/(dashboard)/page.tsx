@@ -6,10 +6,10 @@ import { api } from "@/lib/api";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type {
   DashboardOverview,
-  CriticalAction,
   CriticalActionsResponse,
   ActivitySummaryResponse,
   ScopeOption,
+  TelegramFolder,
   CostSummary,
   WSEvent,
 } from "@/types";
@@ -102,6 +102,13 @@ function ScopeSelector({
     staleTime: 60000,
   });
 
+  const { data: telegramFolders } = useQuery({
+    queryKey: ["telegram-folders-dashboard"],
+    queryFn: () =>
+      api.chat.folders() as Promise<{ folders: TelegramFolder[] }>,
+    staleTime: 60_000,
+  });
+
   // Close on click outside
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -158,6 +165,33 @@ function ScopeSelector({
               Watched Chats...
             </button>
           </div>
+
+          {!!telegramFolders?.folders?.length && (
+            <div className="border-t border-border-element p-1">
+              <p className="px-3 py-1 text-[10px] text-ink-tertiary uppercase tracking-wider">
+                Telegram Folders
+              </p>
+              {telegramFolders.folders.map((f) => (
+                <button
+                  key={f.folder_id}
+                  className="flex w-full items-center px-3 py-2 text-sm text-ink-secondary hover:bg-accent hover:text-ink-primary transition-colors"
+                  onClick={() => {
+                    onScopeChange("custom", f.contact_ids);
+                    setOpen(false);
+                    setShowCustom(false);
+                  }}
+                >
+                  <span className="truncate">
+                    {f.emoticon ? `${f.emoticon} ` : ""}
+                    {f.title}
+                  </span>
+                  <span className="ml-auto text-[10px] text-ink-tertiary">
+                    {f.chat_count}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           {showCustom && options?.contacts && (
             <div className="border-t border-border-element">
@@ -304,6 +338,20 @@ export default function OverviewPage() {
   const handleScopeChange = (type: string, ids?: string[]) => {
     scopeMutation.mutate({ type, ids });
   };
+
+  // ── Regenerate briefing mutation ──
+
+  const regenerateBriefingMutation = useMutation({
+    mutationFn: () =>
+      api.dashboard.activitySummary(true) as Promise<ActivitySummaryResponse>,
+    onSuccess: (data) => {
+      queryClient.setQueryData(["dashboard-briefing"], data);
+      toast.success("Briefing regenerated");
+    },
+    onError: () => {
+      toast.error("Failed to regenerate briefing");
+    },
+  });
 
   // ── Suggestion actions ──
 
@@ -797,23 +845,16 @@ export default function OverviewPage() {
                   variant="outline"
                   size="sm"
                   className="w-full"
-                  onClick={() => {
-                    queryClient.setQueryData(
-                      ["dashboard-briefing"],
-                      undefined
-                    );
-                    api.dashboard
-                      .activitySummary(true)
-                      .then((data) =>
-                        queryClient.setQueryData(
-                          ["dashboard-briefing"],
-                          data
-                        )
-                      );
-                  }}
+                  onClick={() => regenerateBriefingMutation.mutate()}
+                  disabled={regenerateBriefingMutation.isPending}
                 >
-                  <RefreshCw className="mr-1.5 h-3 w-3" strokeWidth={1.5} />
-                  Regenerate Briefing
+                  <RefreshCw
+                    className={`mr-1.5 h-3 w-3 ${regenerateBriefingMutation.isPending ? "animate-spin" : ""}`}
+                    strokeWidth={1.5}
+                  />
+                  {regenerateBriefingMutation.isPending
+                    ? "Regenerating..."
+                    : "Regenerate Briefing"}
                 </Button>
               </div>
             ) : (
