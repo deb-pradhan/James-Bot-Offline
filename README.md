@@ -23,74 +23,238 @@ Frontend (Next.js)  ←→  API (FastAPI)  ←→  PostgreSQL + pgvector
 - **Telegram**: Telethon (userbot API for live monitoring)
 - **Deployment**: Railway (Docker)
 
-## Quick Start (Local Development)
+## Local Setup (Step-by-Step, Detailed)
 
-### Prerequisites
+### 0) Prerequisites
 
-- Docker & Docker Compose
-- Node.js 20+
-- Python 3.12+
-- Anthropic API key
-- Voyage AI API key
+Install these first:
 
-### 1. Clone and configure
+- Docker Desktop (or Docker Engine + Compose plugin)
+- Node.js `20+`
+- Python `3.12+`
+
+Optional but recommended:
+
+- `psql` and `redis-cli` for quick local checks
+- Ollama (if you want local LLM/embeddings)
+
+---
+
+### 1) Clone and prepare environment
+
+From repo root:
 
 ```bash
 cp .env.example .env
-# Edit .env with your API keys
 ```
 
-### 2. Start with Docker Compose
+Open `.env` and set at minimum:
+
+- `JWT_SECRET` (random long string)
+- `ANTHROPIC_API_KEY` (if using cloud LLM flow)
+
+Optional keys:
+
+- `OPENAI_API_KEY` (GPT models + OpenAI embeddings)
+- `VOYAGEAI_API_KEY` (Voyage embeddings fallback)
+
+Do not commit `.env`.
+
+---
+
+### 2) Choose your AI mode (pick one)
+
+#### Mode A: Cloud APIs (fastest to start)
+
+Keep API keys in `.env`:
+
+- `ANTHROPIC_API_KEY` required for Claude
+- `OPENAI_API_KEY` and/or `VOYAGEAI_API_KEY` optional but useful
+
+No Ollama setup required.
+
+#### Mode B: Local AI with Ollama
+
+Option 1 (host Ollama, recommended with Dockerized API):
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull llama3.2
+ollama pull nomic-embed-text
+```
+
+`docker-compose.yml` already points API to host Ollama by default:
+
+- `OLLAMA_BASE_URL=http://host.docker.internal:11434`
+
+Option 2 (run Ollama in Compose):
+
+```bash
+docker compose --profile local-ai up --build
+```
+
+---
+
+### 3) Start the full stack with Docker
+
+From repo root:
 
 ```bash
 docker compose up --build
 ```
 
 This starts:
-- PostgreSQL (port 5432)
-- Redis (port 6379)
-- API server (port 8000)
-- Telegram monitor
-- Frontend (port 3000)
 
-### 3. Open the dashboard
+- PostgreSQL (`localhost:5432`)
+- Redis (`localhost:6379`)
+- API (`http://localhost:8000`)
+- Monitor worker (Telethon relay)
+- Frontend (`http://localhost:3000`)
 
-Visit [http://localhost:3000](http://localhost:3000), create an account, and:
+First boot may take a few minutes due to image build and dependency install.
 
-1. **Upload chat export**: Go to Ingest → upload your Telegram JSON export
-2. **Connect Telegram**: Go to Settings → enter API credentials → verify OTP
-3. **Upload documents**: Go to Knowledge → upload PDFs, docs, or URLs
-4. **Start chatting**: Go to Inbox → generate responses or query history
+---
 
-## Alternative: Run without Docker
+### 4) Verify services are healthy
 
-### Backend
+Check API health:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected:
+
+```json
+{"status":"ok","app":"James Bot"}
+```
+
+Open:
+
+- Frontend: `http://localhost:3000`
+- API docs: `http://localhost:8000/docs`
+
+If frontend loads but API calls fail, confirm:
+
+- `NEXT_PUBLIC_API_URL=http://localhost:8000`
+- `NEXT_PUBLIC_WS_URL=ws://localhost:8000/api/ws`
+
+---
+
+### 5) First-time app setup in UI
+
+1. Register/login at `http://localhost:3000`
+2. Go to **Settings** and configure AI preferences/model/provider
+3. Connect Telegram:
+   - use **Settings -> Telegram** OTP flow, or
+   - set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_STRING` in `.env` (single-user mode)
+4. Go to **Ingest** and upload Telegram JSON export
+5. Wait for ingestion + chunking + embedding to complete
+6. Go to **Inbox** and test:
+   - auto suggestions
+   - manual "Generate Reply"
+7. Go to dashboard/query panel and run natural-language history questions
+
+---
+
+### 6) Useful local commands
+
+Rebuild and restart everything:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+Start with local-ai profile:
+
+```bash
+docker compose --profile local-ai up --build
+```
+
+Reset containers + volumes (destructive):
+
+```bash
+docker compose down -v
+```
+
+Generate Telegram session string manually:
+
+```bash
+python scripts/generate_session.py
+```
+
+---
+
+### 7) Run without Docker (manual services)
+
+Use this only if you prefer native process control.
+
+#### 7.1 Start Postgres + Redis yourself
+
+- Ensure DB exists: `james_bot`
+- Ensure pgvector extension is available
+
+#### 7.2 Backend
 
 ```bash
 cd backend
-python -m venv venv && source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Start PostgreSQL and Redis locally, then:
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Monitor
+#### 7.3 Monitor
+
+In a new terminal:
 
 ```bash
 cd monitor
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python -m monitor.app.main
+python -m app.main
 ```
 
-### Frontend
+#### 7.4 Frontend
+
+In a new terminal:
 
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
+
+---
+
+### 8) Common local issues (quick fixes)
+
+**API container keeps restarting**
+
+- Check `.env` for malformed values
+- Ensure `JWT_SECRET` is set
+- Inspect logs: `docker compose logs api`
+
+**No suggestions generated**
+
+- Confirm AI is enabled in Settings
+- Confirm model/provider is configured
+- Check API logs for provider/auth errors
+
+**Telegram connected but no live events**
+
+- Verify monitor service is running
+- Check Redis connectivity (`REDIS_URL`)
+- Check monitor logs: `docker compose logs monitor`
+
+**Frontend shows stale env values**
+
+- `NEXT_PUBLIC_*` values are baked at build time
+- Rebuild web image: `docker compose up --build web`
 
 ## Railway Deployment
 
